@@ -2,7 +2,6 @@ import json
 import random
 import sys
 from pathlib import Path
-from typing import Annotated
 
 import outlines
 from mlx_lm import load
@@ -54,26 +53,23 @@ TWIST_DIRECTIONS = (
     "The evidence is real but was left out on purpose by someone the narrator trusted.",
 )
 
-Beat = Annotated[str, Field(min_length=12, max_length=162)]
-
-
 class Plot(BaseModel):
-    incident: Beat
-    stakes: Beat
-    wrong_belief: Beat
-    clue: Beat
-    reveal: Beat
-    choice: Beat
+    incident: str
+    stakes: str
+    wrong_belief: str
+    clue: str
+    reveal: str
+    choice: str
 
 
 class Ending(BaseModel):
-    ending: list[Beat] = Field(min_length=3, max_length=13)
+    ending: list[str] = Field(min_length=3, max_length=13)
 
 
 class Story(Ending):
-    title: str = Field(min_length=5, max_length=75)
-    hooks: list[Beat] = Field(min_length=3, max_length=3)
-    setup: list[Beat] = Field(min_length=4, max_length=24)
+    title: str
+    hooks: list[str] = Field(min_length=3, max_length=3)
+    setup: list[str] = Field(min_length=4, max_length=24)
 
 def text_list(value, minimum, maximum, word_limit):
     return isinstance(value, list) and minimum <= len(value) <= maximum and all(
@@ -112,7 +108,8 @@ if __name__ == "__main__":
         return generate_json(prompt, json.dumps(context), validate, limit, engine=engine, processor=processor)
 
     if action == "draft":
-        plan = write(PLAN_PROMPT, data, Plot, bool, 650)
+        plan = write(PLAN_PROMPT, data, Plot,
+                     lambda value: all(5 <= len(line.strip()) <= 220 for line in value.values()), 650)
         context = {"premise": data, "plot": plan, "word target for setup and ending together": target}
         result = write(STORY_PROMPT, context, Story, lambda story: valid_story(story, target), 2400)
         openings = {normalize(line) for line in result["hooks"]}
