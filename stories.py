@@ -106,7 +106,7 @@ def narrate(directory, filename, lines, voice, language="en"):
         for line in narration_chunks(lines):
             chunks = list(narrator.generate_custom_voice(
                 text=line, speaker=VOICES[voice], language="russian" if language == "ru" else "english",
-                instruct=LOCAL_STYLE[language], max_tokens=640,
+                instruct=LOCAL_STYLE[language], temperature=0.65, max_tokens=420,
             ))
             if not chunks or any(chunk.sample_rate != RATE for chunk in chunks):
                 raise ValueError("Unexpected narration audio")
@@ -128,7 +128,7 @@ def narrate(directory, filename, lines, voice, language="en"):
 def narration_chunks(lines):
     paragraph = ""
     for line in lines:
-        if paragraph and len(paragraph) + 1 + len(line) > 280:
+        if paragraph and len(paragraph) + 1 + len(line) > 170:
             yield paragraph
             paragraph = ""
         paragraph = f"{paragraph} {line}" if paragraph else line
