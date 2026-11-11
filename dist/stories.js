@@ -7,6 +7,44 @@ const film = get("story-film");
 const download = get("story-download");
 const notice = get("story-notice");
 const storyCard = get("story-card");
+const premise = get("story-premise");
+const premiseSource = get("premise-source");
+const episodePremises = [
+  {
+    title: "За день до свадьбы",
+    idea: "Накануне свадьбы я узнал, что невеста мне изменила. Она просит прощения, а мне нужно решить, что сказать гостям и состоится ли свадьба.",
+    category: "Relationship drama",
+    source: "https://rutube.ru/video/5ba6eebb85c1443af5f6c3f343594d6b/",
+  },
+  {
+    title: "Сестра хочет мою свадьбу",
+    idea: "Моя сестра пытается забрать себе свадьбу, которую я уже спланировала. Семья ждёт, что я уступлю, но я решаю ответить ей.",
+    category: "Family secrets",
+    source: "https://rutube.ru/video/3d7da38082d9b406e6d37f859a3bfbad/",
+  },
+  {
+    title: "Что произошло после измены",
+    idea: "Я узнал, что жена мне изменила. Позже последствия её собственного решения изменили нашу жизнь, и я понял, что больше не хочу её выручать.",
+    category: "Relationship drama",
+    source: "https://rutube.ru/video/8149635564054ebd5cb81015958d8031/",
+  },
+];
+
+premise.append(...episodePremises.map((entry, index) => new Option(entry.title, String(index))));
+premise.addEventListener("change", () => {
+  const entry = premise.value === "" ? null : episodePremises[Number(premise.value)];
+  premiseSource.hidden = !entry;
+  if (!entry) {
+    premiseSource.removeAttribute("href");
+    return;
+  }
+  premiseSource.href = entry.source;
+  get("story-idea").value = entry.idea;
+  if ([...genre.options].some((option) => option.value === entry.category)) {
+    genre.value = entry.category;
+  }
+});
+
 let activeId;
 let ready = false;
 
@@ -28,7 +66,7 @@ function announce(text, error = false) {
 
 function busy(state) {
   get("draft").disabled = state || !ready;
-  for (const id of ["genre", "narrator", "language", "duration", "background", "story-idea", "export", "twist"]) {
+  for (const id of ["genre", "narrator", "language", "duration", "background", "story-premise", "story-idea", "export", "twist"]) {
     get(id).disabled = state;
   }
 }

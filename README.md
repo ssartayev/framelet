@@ -25,10 +25,20 @@ For cloud narration, set `ELEVENLABS_API_KEY` in the server environment and set
 `FRAMELET_ELEVENLABS_VOICE_EN` and/or `FRAMELET_ELEVENLABS_VOICE_RU` to the ElevenLabs
 voice IDs you want to use for each language. Choose a voice recorded in that language.
 Restart Framelet and select **ElevenLabs** under Narrator. The service receives the story text
-and generates each opening preview and the final narration. Drafting and captions still run locally.
+and generates each opening preview and the final narration. Subtitle alignment runs locally.
 
-Set `GROQ_API_KEY` in the server environment before launching Framelet to use Groq
-for Reddit Stories drafts and alternate endings. The default model is
-`openai/gpt-oss-120b`. Set `FRAMELET_GROQ_MODEL` to compare another Groq model.
-Without the key, stories use the local writer. Subtitle alignment still uses
-local models.
+Set `GROQ_API_KEY` or `GEMINI_API_KEY` in the server environment to write stories
+through an API. If both are set, Framelet defaults to Groq. Set
+`FRAMELET_STORY_DRAFT_PROVIDER` and `FRAMELET_STORY_TWIST_PROVIDER` independently
+to `groq`, `gemini`, or `local`. Without either key, Framelet defaults to the
+local writer. The API model defaults are `openai/gpt-oss-120b` and
+`gemini-3.8-flash`, configurable with `FRAMELET_GROQ_MODEL` and
+`FRAMELET_GEMINI_MODEL`.
+
+To compare both providers, export both keys and run
+`runtime/venv/bin/python scripts/compare_story_writers.py`. The report in
+`runtime/story-provider-comparison.json` records English and Russian drafts,
+alternate endings, request errors, and elapsed time.
+
+Edit [STORY_RULES.md](STORY_RULES.md) to tune plot structure, openings, and endings.
+Framelet loads the rules for each draft and alternate ending.

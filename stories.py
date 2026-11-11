@@ -15,6 +15,7 @@ import certifi
 
 from story_captions import FONT_DIR, TIMING_MODELS, write_captions
 from story_validation import story_is_reasonable
+from story_writer import MODEL as DEFAULT_STORY_MODEL, writer_provider
 
 ROOT = Path(__file__).resolve().parent
 MODELS = ROOT / "runtime/models"
@@ -82,7 +83,13 @@ def ready(language="en", voice=None):
     timing_model = TIMING_MODELS[language]
     voices = available_voices(language)
     voice_ready = bool(voices) if voice is None else voice in voices
-    writer_ready = bool(os.environ.get("GROQ_API_KEY", "").strip()) or (MODELS / "story-writer/model.safetensors").is_file()
+    model_path = Path(os.environ.get("FRAMELET_STORY_MODEL", str(DEFAULT_STORY_MODEL)))
+    provider = writer_provider("draft", os.environ)
+    writer_ready = (
+        (model_path / "model.safetensors").is_file() or any(model_path.glob("model-*.safetensors"))
+        if provider == "local"
+        else provider in ("groq", "gemini") and bool(os.environ.get(f"{provider.upper()}_API_KEY", "").strip())
+    )
     return voice_ready and writer_ready and all(path.is_file() for path in (
         timing_model / "weights.npz",
         timing_model / "config.json", timing_model / "tokenizer.json", timing_model / "preprocessor_config.json",
@@ -152,11 +159,9 @@ def write_story(action, data, env):
             capture_output=True, text=True, check=True, timeout=180, cwd=ROOT, env=env,
         )
     except subprocess.CalledProcessError as error:
-        if env.get("GROQ_API_KEY", "").strip():
-            detail = error.stderr.strip()
-            if detail.startswith(("Groq ", "Framelet could not reach Groq")) and "\n" not in detail:
-                raise NarrationError(detail) from error
-            raise NarrationError("The Groq story writer failed. Try again.") from error
+        detail = error.stderr.strip()
+        if detail.startswith(("Groq ", "Gemini ", "Story writer ")) and "\n" not in detail:
+            raise NarrationError(detail) from error
         raise NarrationError("The local writer could not create a concise story. Try another idea.") from error
     return json.loads(result.stdout.splitlines()[-1])
 

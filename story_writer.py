@@ -1,10 +1,10 @@
 import json
 import os
-import random
 import ssl
 import sys
 from pathlib import Path
 from urllib.error import HTTPError, URLError
+from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 import certifi
@@ -12,60 +12,76 @@ from story_validation import story_is_reasonable
 
 MODEL = Path(__file__).resolve().parent / "runtime/models/story-writer"
 
-TWIST_PROMPT = """Continue this fictional first-person story after its final setup sentence.
-Resolve the existing clue and conflict with a concrete new motive, then show what the narrator
-decides to do. The new reveal must change what happened or why, without changing anything
-already established in the setup. Do not repeat the setup or rewrite the old ending. Follow the
-suggested direction if it fits. Use short spoken sentences matching the word target. Return only JSON:
-{"ending":["sentence 1","sentence 2","sentence 3"]}.
+PLOT_RULES = Path(__file__).with_name("STORY_RULES.md")
+
+TWIST_PROMPT = """Replace the ending using the plot rules. The setup and openings are fixed.
+Write three to five short spoken sentences that fit the remaining word budget.
+Return only JSON with the key ending, an array of those sentences.
 """
 
-TWIST_DIRECTIONS = (
-    "A lie hid a smaller wrongdoing and accidentally exposed a bigger betrayal.",
-    "The obvious suspect was protecting someone the narrator had blamed.",
-    "The evidence is real but was left out on purpose by someone the narrator trusted.",
-)
 
-def write_with_groq(prompt, context, validate, key):
-    messages = [
-        {"role": "system", "content": prompt},
-        {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
-    ]
+def writer_provider(action, env):
+    default = next((name for name in ("groq", "gemini") if env.get(f"{name.upper()}_API_KEY", "").strip()), "local")
+    return env.get(f"FRAMELET_STORY_{action.upper()}_PROVIDER", default).strip().lower()
+
+
+def write_with_api(provider, prompt, context, validate, key):
+    user_text = json.dumps(context, ensure_ascii=False)
     tls = ssl.create_default_context(cafile=certifi.where())
+    name = {"groq": "Groq", "gemini": "Gemini"}[provider]
     for attempt in range(2):
-        request = Request(
-            "https://api.groq.com/openai/v1/chat/completions",
-            data=json.dumps({
+        if provider == "groq":
+            url = "https://api.groq.com/openai/v1/chat/completions"
+            headers = {"Authorization": f"Bearer {key}"}
+            body = {
                 "model": os.environ.get("FRAMELET_GROQ_MODEL", "openai/gpt-oss-120b"),
-                "messages": messages,
+                "messages": [{"role": "system", "content": prompt}, {"role": "user", "content": user_text}],
                 "response_format": {"type": "json_object"},
                 "max_completion_tokens": 2600,
-            }).encode(),
-            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-        )
+            }
+        else:
+            model = quote(os.environ.get("FRAMELET_GEMINI_MODEL", "gemini-3.8-flash"), safe="")
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+            headers = {"x-goog-api-key": key}
+            body = {
+                "systemInstruction": {"parts": [{"text": prompt}]},
+                "contents": [{"parts": [{"text": user_text}]}],
+                "generationConfig": {"responseMimeType": "application/json", "maxOutputTokens": 4096},
+            }
+        request = Request(url, data=json.dumps(body).encode(),
+                          headers={**headers, "Content-Type": "application/json", "User-Agent": "Framelet/1.0"})
         try:
             with urlopen(request, context=tls, timeout=45) as response:
                 payload = json.load(response)
         except HTTPError as error:
-            messages_by_status = {
-                401: "Groq rejected the API key. Check GROQ_API_KEY and restart Framelet.",
-                429: "Groq's rate limit was reached. Try again in a moment.",
-            }
-            raise RuntimeError(messages_by_status.get(error.code, f"Groq returned HTTP {error.code}.")) from None
-        except (URLError, TimeoutError):
-            raise RuntimeError("Framelet could not reach Groq. Try again.") from None
+            raise RuntimeError(f"{name} returned HTTP {error.code}.") from None
+        except TimeoutError:
+            raise RuntimeError(f"{name} timed out waiting for a response.") from None
+        except URLError as error:
+            if isinstance(error.reason, TimeoutError):
+                raise RuntimeError(f"{name} timed out connecting to the API.") from None
+            if isinstance(error.reason, ssl.SSLCertVerificationError):
+                raise RuntimeError(f"{name} connection failed TLS certificate verification.") from None
+            raise RuntimeError(f"{name} could not connect to the API.") from None
+        except ValueError:
+            payload = {}
         try:
-            result = json.loads(payload["choices"][0]["message"]["content"])
+            if provider == "groq":
+                content = payload["choices"][0]["message"]["content"]
+            else:
+                parts = payload["candidates"][0]["content"]["parts"]
+                content = "".join(part.get("text", "") for part in parts if not part.get("thought"))
+            result = json.loads(content)
         except (KeyError, IndexError, TypeError, ValueError):
             result = None
         if validate(result):
             return result
         if attempt == 0:
-            messages.append({"role": "user", "content": (
-                "Try again. Return only the requested JSON. Keep sentences short, avoid repeated "
+            user_text += (
+                "\nTry again. Return only the requested JSON. Keep sentences short, avoid repeated "
                 "phrases, and keep the complete narration within the requested length."
-            )})
-    raise RuntimeError("Groq could not produce a story within the format and length limits.")
+            )
+    raise RuntimeError(f"{name} could not produce a story within the format and length limits.")
 
 
 def text_list(value, minimum, maximum, word_limit):
@@ -99,17 +115,24 @@ if __name__ == "__main__":
              "Не калькируй с английского. Используй короткие фразы, как в голосовом сообщении другу. "
              "Каждая фраза должна добавлять новую деталь или реакцию."
              if language == "ru" else " Write all values in natural conversational English. Spell numbers out.")
-    key = os.environ.get("GROQ_API_KEY", "").strip()
-    if not key:
+    rules = PLOT_RULES.read_text(encoding="utf-8")
+    provider = writer_provider(action, os.environ)
+    if provider not in ("groq", "gemini", "local"):
+        sys.exit("Story writer provider must be groq, gemini, or local.")
+    key = os.environ.get(f"{provider.upper()}_API_KEY", "").strip()
+    if provider != "local" and not key:
+        sys.exit(f"Story writer needs {provider.upper()}_API_KEY.")
+    if provider == "local":
         from mlx_lm import load
         from writer import generate_json
 
         engine = load(os.environ.get("FRAMELET_STORY_MODEL", str(MODEL)))
 
     def write(prompt, context, validate, limit):
-        if key:
+        prompt = f"{rules}\n\n{prompt}\n{style}"
+        if provider != "local":
             try:
-                return write_with_groq(prompt, context, validate, key)
+                return write_with_api(provider, prompt, context, validate, key)
             except RuntimeError as error:
                 sys.exit(str(error))
         processor = None
@@ -141,7 +164,9 @@ if __name__ == "__main__":
             "Return only JSON with title, hooks (three distinct possible opening sentences), "
             "setup (the incident in chronological order), and ending (the payoff). "
             f"Aim for {target} words in one hook plus setup and ending. "
-            "Each array item is one short sentence. The setup must work after any hook."
+            "Each array item is one short sentence. Write the setup and ending first in your planning. "
+            "All three hooks describe the same event that actually happens in the setup. "
+            "The ending must resolve the opening mystery with a concrete reason or consequence."
         )
         if language == "ru":
             prompt = (
@@ -153,10 +178,11 @@ if __name__ == "__main__":
                 f"Около {target} слов: одно вступление, затем завязка и развязка. "
                 "Верни только JSON с ключами title, hooks, setup, ending. "
                 "Title — название, остальные поля — массивы коротких фраз. "
-                "В hooks дай три формулировки одного вступления, в setup — события, в ending — развязку."
+                "В hooks дай три формулировки одного события из завязки. "
+                "В setup покажи события по порядку, в ending раскрой конкретную причину или последствие."
             )
         result = write(
-            prompt + style, data,
+            prompt, data,
             lambda value: valid_story(value) and story_is_reasonable(value, duration),
             {30: 650, 60: 1000, 120: 1700}[duration],
         )
@@ -173,9 +199,9 @@ if __name__ == "__main__":
                 and story_is_reasonable({**data, "ending": new_lines(value["ending"])}, duration)
             )
 
-        context = {"setup": data["setup"], "previous ending to avoid": " ".join(data["ending"]),
-                   "direction": random.choice(TWIST_DIRECTIONS),
+        context = {"hooks": data["hooks"], "setup": data["setup"],
+                   "previous ending to avoid": " ".join(data["ending"]),
                    "ending word target": max(22, target - sum(len(line.split()) for line in data["setup"]))}
-        result = write(TWIST_PROMPT + style, context, valid_twist, 1100)
+        result = write(TWIST_PROMPT, context, valid_twist, 1100)
         result["ending"] = new_lines(result["ending"])
     print(json.dumps(result))
