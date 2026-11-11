@@ -69,7 +69,18 @@ class Ending(BaseModel):
 class Story(Ending):
     title: str
     hooks: list[str] = Field(min_length=3, max_length=3)
-    setup: list[str] = Field(min_length=4, max_length=24)
+    setup: list[str] = Field(min_length=7, max_length=13)
+    ending: list[str] = Field(min_length=4, max_length=8)
+
+
+class ShortStory(Story):
+    setup: list[str] = Field(min_length=4, max_length=6)
+    ending: list[str] = Field(min_length=3, max_length=4)
+
+
+class LongStory(Story):
+    setup: list[str] = Field(min_length=13, max_length=24)
+    ending: list[str] = Field(min_length=6, max_length=13)
 
 def text_list(value, minimum, maximum, word_limit):
     return isinstance(value, list) and minimum <= len(value) <= maximum and all(
@@ -82,24 +93,19 @@ def normalize(line):
     return line.casefold().strip().rstrip(".!?")
 
 
-def valid_story(value, target):
-    if not (
-        isinstance(value, dict) and isinstance(value.get("title"), str)
-        and 0 < len(value["title"].strip()) <= 100
-        and text_list(value.get("hooks"), 3, 3, 20)
-        and text_list(value.get("setup"), 4, 24, 32)
-        and text_list(value.get("ending"), 3, 13, 32)
-    ):
-        return False
-    script = value["setup"] + value["ending"]
-    words = sum(len(line.split()) for line in script)
-    return target * 0.72 <= words <= target * 1.25 and len({normalize(line) for line in value["hooks"]}) == 3
+def valid_story(value):
+    return (
+        isinstance(value, dict) and isinstance(value.get("title"), str) and bool(value["title"].strip())
+        and all(isinstance(value.get(key), list) and all(isinstance(line, str) and line.strip() for line in value[key])
+                for key in ("hooks", "setup", "ending"))
+    )
 
 
 if __name__ == "__main__":
     action = sys.argv[1]
     data = json.load(sys.stdin)
-    target = {30: 68, 60: 140, 120: 280}[data.get("duration", 60)]
+    duration = data.get("duration", 60)
+    target = {30: 68, 60: 140, 120: 280}[duration]
     engine = load(str(MODEL))
     model = outlines.from_mlxlm(*engine)
 
@@ -111,7 +117,8 @@ if __name__ == "__main__":
         plan = write(PLAN_PROMPT, data, Plot,
                      lambda value: all(5 <= len(line.strip()) <= 220 for line in value.values()), 650)
         context = {"premise": data, "plot": plan, "word target for setup and ending together": target}
-        result = write(STORY_PROMPT, context, Story, lambda story: valid_story(story, target), 2400)
+        schema = {30: ShortStory, 60: Story, 120: LongStory}[duration]
+        result = write(STORY_PROMPT, context, schema, valid_story, 2400)
         openings = {normalize(line) for line in result["hooks"]}
         setup = [line for line in result["setup"] if normalize(line) not in openings]
         if len(setup) >= 4:
