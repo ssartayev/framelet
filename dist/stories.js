@@ -192,6 +192,7 @@ background.addEventListener("change", showBackground);
 
 try {
   const options = await api("/api/stories/options");
+  if (options.storiesOnly) get("ai-video-tab").hidden = true;
   preparedStoryReady = options.preparedStoryReady;
   episodePremises = new Map(options.premises.map((entry) => [entry.id, entry]));
   premise.append(...options.premises.map((entry) => new Option(entry.title, entry.id)));
@@ -206,9 +207,9 @@ try {
     narrator.replaceChildren(...Object.entries(voices).map(([id, name]) => new Option(name, id)));
     if (Object.hasOwn(voices, previousVoice)) narrator.value = previousVoice;
     ready = options.readyByLanguage[language];
-    get("story-status").textContent = ready ? "STORY STUDIO" : "MODEL SETUP";
+    get("story-status").textContent = ready ? "STORY STUDIO" : "API SETUP";
     busy(false);
-    announce(ready ? "" : "Run setup.sh to install the local story models, then refresh.", !ready);
+    announce(ready ? "" : "Configure a cloud writer key and an ElevenLabs voice for this language, then refresh.", !ready);
   }
   get("language").addEventListener("change", updateVoices);
   updateVoices();

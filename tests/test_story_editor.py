@@ -1,3 +1,4 @@
+import base64
 import io
 import json
 import os
@@ -68,15 +69,84 @@ class WriterTests(unittest.TestCase):
             self.rewrite("ending", {"ending": ENDING * 10}, {"ending": ENDING * 10})
 
 
+    def test_cloud_fallback_from_groq_to_gemini(self):
+        body = {"idea": "Ключи от мастерской", "language": "ru", "duration": 30}
+        gemini = {"candidates": [{"content": {"parts": [
+            {"text": "ignored", "thought": True}, {"text": json.dumps(STORY)},
+        ]}}]}
+        stdout = io.StringIO()
+        with (
+            patch.dict(os.environ, {"GROQ_API_KEY": "test", "GEMINI_API_KEY": "test"}, clear=True),
+            patch.object(sys, "argv", ["story_writer.py", "draft"]),
+            patch.object(sys, "stdin", io.StringIO(json.dumps(body))),
+            patch.object(sys, "stdout", stdout),
+            patch("urllib.request.urlopen", side_effect=[
+                HTTPError("", 429, "", {}, None), io.BytesIO(json.dumps(gemini).encode()),
+            ]) as send,
+        ):
+            runpy.run_path("story_writer.py", run_name="__main__")
+        self.assertEqual(json.loads(stdout.getvalue()), STORY)
+        self.assertEqual([call.args[0].host for call in send.call_args_list],
+                         ["api.groq.com", "generativelanguage.googleapis.com"])
+
+    def test_missing_keys_do_not_load_local_model(self):
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(sys, "argv", ["story_writer.py", "draft"]),
+            patch.object(sys, "stdin", io.StringIO("{}")),
+            self.assertRaisesRegex(SystemExit, "needs GROQ_API_KEY"),
+        ):
+            runpy.run_path("story_writer.py", run_name="__main__")
+
+
+def elevenlabs_response(script, duration=2):
+    return {
+        "audio_base64": base64.b64encode(bytes(int(duration * stories.RATE) * 2)).decode(),
+        "alignment": {
+            "characters": list(script),
+            "character_start_times_seconds": [duration * i / len(script) for i in range(len(script))],
+        },
+    }
+
+
 class NarrationTests(unittest.TestCase):
-    def test_cloud_uses_one_script_and_adds_sentence_pauses(self):
-        with tempfile.TemporaryDirectory() as folder, patch.object(stories, "cloud_narration", return_value=bytes(48_000)) as synthesize:
+    def test_cloud_audio_and_timings_use_one_request(self):
+        script = "Он кивнул. Она спросила: «Зачем?»"
+        payload = elevenlabs_response(script)
+        with (
+            tempfile.TemporaryDirectory() as folder,
+            patch.dict(os.environ, ELEVENLABS_API_KEY="test", FRAMELET_ELEVENLABS_VOICE_RU="test-voice"),
+            patch("stories.urlopen", return_value=io.BytesIO(json.dumps(payload).encode())) as send,
+        ):
             directory = Path(folder)
-            cues = stories.narrate(directory, "preview.wav", ["Он кивнул", "Она спросила: «Зачем?»"], "elevenlabs", "ru")
-            synthesize.assert_called_once_with("Он кивнул. Она спросила: «Зачем?»", "ru")
+            cues, words = stories.narrate(directory, "preview.wav", ["Он кивнул", "Она спросила: «Зачем?»"], "elevenlabs", "ru")
+            request = send.call_args.args[0]
+            self.assertIn("/with-timestamps?output_format=pcm_24000", request.full_url)
+            self.assertEqual(json.loads(request.data)["text"], script)
             with wave.open(str(directory / "preview.wav"), "rb") as audio:
-                self.assertEqual(audio.getnframes() / audio.getframerate(), 1)
-            self.assertEqual(cues, [(0, 1, "Он кивнул. Она спросила: «Зачем?»")])
+                self.assertEqual(audio.getnframes() / audio.getframerate(), 2)
+            self.assertEqual(cues, [(0, 2, script)])
+            self.assertEqual([item["word"] for item in words], script.split())
+
+    def test_corrupt_alignment_is_a_provider_error(self):
+        payload = elevenlabs_response("Hello.")
+        payload["alignment"]["character_start_times_seconds"][1] = -1
+        with (
+            patch.dict(os.environ, ELEVENLABS_API_KEY="test", FRAMELET_ELEVENLABS_VOICE_EN="test-voice"),
+            patch("stories.urlopen", return_value=io.BytesIO(json.dumps(payload).encode())),
+            self.assertRaisesRegex(stories.NarrationError, "invalid audio or caption timing"),
+        ):
+            stories.cloud_narration("Hello.", "en")
+
+    def test_readiness_is_based_on_cloud_credentials(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(stories.ready("ru"))
+            self.assertEqual(stories.available_voices("ru"), {})
+        with patch.dict(os.environ, {
+            "GEMINI_API_KEY": "test", "ELEVENLABS_API_KEY": "test", "FRAMELET_ELEVENLABS_VOICE_RU": "test",
+        }, clear=True):
+            self.assertTrue(stories.ready("ru"))
+            self.assertFalse(stories.ready("en"))
 
 
 class EditorHTTPTests(unittest.TestCase):
@@ -88,6 +158,7 @@ class EditorHTTPTests(unittest.TestCase):
         self.enterContext(patch.object(stories, "available_voices", return_value=stories.VOICES))
         self.writer = self.enterContext(patch.object(stories, "write_story", return_value=STORY))
         self.narrator = self.enterContext(patch.object(stories, "narrate", side_effect=self.fake_audio))
+        self.enterContext(patch.object(app.App, "stories_only", True))
         self.server = self.enterContext(app.ThreadingHTTPServer(("127.0.0.1", 0), app.App))
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -117,7 +188,7 @@ class EditorHTTPTests(unittest.TestCase):
 
     def draft(self, idea="Ключи от мастерской"):
         result = self.request("/api/stories", {
-            "idea": idea, "category": "Family secrets", "voice": "am_michael", "language": "ru", "duration": 30,
+            "idea": idea, "category": "Family secrets", "voice": "elevenlabs", "language": "ru", "duration": 30,
         })
         self.wait_for(result["id"], "pitch")
         return result["id"]
@@ -165,20 +236,34 @@ class EditorHTTPTests(unittest.TestCase):
             with self.subTest(premise=entry["id"]):
                 job = self.request("/api/stories", {
                     "premise": entry["id"], "category": entry["category"],
-                    "voice": "am_michael", "language": "ru", "duration": 30,
+                    "voice": "elevenlabs", "language": "ru", "duration": 30,
                 })
                 self.assertEqual(self.wait_for(job["id"], "pitch")["story"], stories.PREMISES[entry["id"]]["story"])
         self.writer.assert_not_called()
         self.narrator.assert_not_called()
 
     def test_invalid_prepared_story_requests_are_rejected(self):
-        request = {"premise": "brother-job", "category": "Family secrets", "voice": "am_michael",
+        request = {"premise": "brother-job", "category": "Family secrets", "voice": "elevenlabs",
                    "language": "ru", "duration": 30}
         for override in ({"premise": "missing"}, {"premise": []}, {"language": "en"}, {"duration": 60}):
             with self.subTest(override=override), self.assertRaises(HTTPError) as error:
                 self.request("/api/stories", {**request, **override})
             self.assertEqual(error.exception.code, 400)
         self.writer.assert_not_called()
+
+    def test_cloud_deployment_routes_and_https_origin(self):
+        with urlopen(self.base + "/", timeout=3) as response:
+            self.assertTrue(response.url.endswith("/stories.html"))
+        self.assertTrue(self.request("/api/stories/options")["storiesOnly"])
+        with self.assertRaises(HTTPError) as error:
+            self.request("/api/pitch", {"idea": "test"})
+        self.assertEqual(error.exception.code, 404)
+        request = Request(self.base + "/api/stories", data=json.dumps({
+            "idea": "Test", "category": "Family secrets", "voice": "elevenlabs", "duration": 30,
+        }).encode(), headers={"Origin": self.base.replace("http:", "https:")})
+        with urlopen(request, timeout=3) as response:
+            self.assertEqual(response.status, 202)
+            self.wait_for(json.load(response)["id"], "pitch")
 
     def test_unicode_source_text_fits_request_limit(self):
         source = "П" * 4000

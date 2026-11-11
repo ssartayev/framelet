@@ -6,9 +6,13 @@ mkdir -p runtime/{bin,models,wan/bin}
 if [[ ! -x runtime/venv/bin/python ]]; then
   python3 -m venv runtime/venv
 fi
-runtime/venv/bin/python -m pip install certifi imageio-ffmpeg mlx-lm mlx-audio==0.6.5 outlines==1.3.3 pillow
+runtime/venv/bin/python -m pip install -r requirements-stories.txt imageio-ffmpeg
 ffmpeg_path=$(runtime/venv/bin/python -c 'import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())')
 ln -sf "$ffmpeg_path" runtime/bin/ffmpeg
+if [[ ${1:-} == --stories-only ]]; then
+  exit 0
+fi
+runtime/venv/bin/python -m pip install mlx-lm
 runtime/venv/bin/python make_backgrounds.py
 
 if [[ ! -x runtime/wan/bin/sd-cli ]]; then
@@ -26,30 +30,6 @@ export HF_HUB_DOWNLOAD_TIMEOUT=90
 if [[ ! -s runtime/models/writer/model.safetensors ]]; then
   "$hf" download mlx-community/Qwen3-1.7B-4bit --local-dir runtime/models/writer
 fi
-if [[ ! -s runtime/models/story-writer/model.safetensors ]]; then
-  "$hf" download mlx-community/Qwen3.5-4B-4bit --local-dir runtime/models/story-writer
-fi
-if [[ ! -s runtime/models/narrator/model.safetensors || ! -s runtime/models/narrator/speech_tokenizer/model.safetensors ]]; then
-  "$hf" download mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-4bit --local-dir runtime/models/narrator
-fi
-if [[ ! -s runtime/models/word-timing/weights.npz ]]; then
-  "$hf" download mlx-community/whisper-tiny.en-mlx --local-dir runtime/models/word-timing
-fi
-if [[ ! -s runtime/models/word-timing/tokenizer.json ]]; then
-  "$hf" download openai/whisper-tiny.en generation_config.json preprocessor_config.json \
-    tokenizer_config.json tokenizer.json special_tokens_map.json vocab.json merges.txt normalizer.json \
-    --local-dir runtime/models/word-timing
-fi
-
-if [[ ! -s runtime/models/word-timing-multi/weights.npz || ! -s runtime/models/word-timing-multi/config.json ]]; then
-  "$hf" download mlx-community/whisper-tiny-mlx --local-dir runtime/models/word-timing-multi
-fi
-if [[ ! -s runtime/models/word-timing-multi/tokenizer.json ]]; then
-  "$hf" download openai/whisper-tiny generation_config.json preprocessor_config.json \
-    tokenizer_config.json tokenizer.json special_tokens_map.json vocab.json merges.txt \
-    --local-dir runtime/models/word-timing-multi
-fi
-
 download_model() {
   local target=$1 digest=$2 url=$3
   if [[ -f "$target" ]] && printf '%s  %s\n' "$digest" "$target" | shasum -a 256 -c --status; then

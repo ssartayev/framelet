@@ -10,8 +10,6 @@ from urllib.request import Request, urlopen
 import certifi
 from story_validation import story_is_reasonable
 
-MODEL = Path(__file__).resolve().parent / "runtime/models/story-writer"
-
 PLOT_RULES = Path(__file__).with_name("STORY_RULES.md")
 
 TWIST_PROMPT = """Replace the ending using the plot rules. The setup and openings are fixed.
@@ -21,7 +19,7 @@ Return only JSON with the key ending, an array of those sentences.
 
 
 def writer_provider(action, env):
-    default = next((name for name in ("groq", "gemini") if env.get(f"{name.upper()}_API_KEY", "").strip()), "local")
+    default = next((name for name in ("groq", "gemini") if env.get(f"{name.upper()}_API_KEY", "").strip()), "groq")
     return env.get(f"FRAMELET_STORY_{action.upper()}_PROVIDER", default).strip().lower()
 
 
@@ -51,7 +49,7 @@ def write_with_api(provider, prompt, context, validate, key):
         request = Request(url, data=json.dumps(body).encode(),
                           headers={**headers, "Content-Type": "application/json", "User-Agent": "Framelet/1.0"})
         try:
-            with urlopen(request, context=tls, timeout=45) as response:
+            with urlopen(request, context=tls, timeout=35) as response:
                 payload = json.load(response)
         except HTTPError as error:
             raise RuntimeError(f"{name} returned HTTP {error.code}.") from None
@@ -118,42 +116,26 @@ if __name__ == "__main__":
              if language == "ru" else " Write all values in natural conversational English. Spell numbers out.")
     rules = PLOT_RULES.read_text(encoding="utf-8")
     provider = writer_provider(action, os.environ)
-    if provider not in ("groq", "gemini", "local"):
-        sys.exit("Story writer provider must be groq, gemini, or local.")
+    if provider not in ("groq", "gemini"):
+        sys.exit("Story writer provider must be groq or gemini.")
     key = os.environ.get(f"{provider.upper()}_API_KEY", "").strip()
-    if provider != "local" and not key:
+    if not key:
         sys.exit(f"Story writer needs {provider.upper()}_API_KEY.")
-    if provider == "local":
-        from mlx_lm import load
-        from writer import generate_json
 
-        engine = load(os.environ.get("FRAMELET_STORY_MODEL", str(MODEL)))
-
-    def write(prompt, context, validate, limit):
+    def write(prompt, context, validate):
         prompt = f"{rules}\n\n{prompt}\n{style}"
-        if provider != "local":
-            try:
-                return write_with_api(provider, prompt, context, validate, key)
-            except RuntimeError as error:
+        try:
+            return write_with_api(provider, prompt, context, validate, key)
+        except RuntimeError as error:
+            # Explicit routing also keeps benchmark runs pinned to the chosen provider.
+            alternate = "gemini" if provider == "groq" else "groq"
+            alternate_key = os.environ.get(f"{alternate.upper()}_API_KEY", "").strip()
+            if os.environ.get(f"FRAMELET_STORY_{action.upper()}_PROVIDER") or not alternate_key:
                 sys.exit(str(error))
-        processor = None
-        if action == "twist":
-            from typing import Annotated
-
-            import outlines
-            from pydantic import BaseModel, Field
-
-            line_limit = 76 if duration == 30 else 120
-            line_type = Annotated[str, Field(max_length=line_limit)]
-
-            class Ending(BaseModel):
-                ending: list[line_type] = Field(min_length=3, max_length=3 if duration == 30 else 13)
-
-            processor = outlines.Generator(outlines.from_mlxlm(*engine), Ending).logits_processor
-        return generate_json(
-            prompt, json.dumps(context, ensure_ascii=False), validate, limit,
-            engine=engine, processor=processor, repetition_penalty=1.08,
-        )
+            try:
+                return write_with_api(alternate, prompt, context, validate, alternate_key)
+            except RuntimeError as alternate_error:
+                sys.exit(f"{error} {alternate_error}")
 
     if action == "draft":
         prompt = (
@@ -185,7 +167,6 @@ if __name__ == "__main__":
         result = write(
             prompt, data,
             lambda value: valid_story(value) and story_is_reasonable(value, duration),
-            {30: 650, 60: 1000, 120: 1700}[duration],
         )
     elif action == "rewrite":
         original = data["story"]
@@ -218,7 +199,7 @@ if __name__ == "__main__":
             return (candidate != original and valid_story(candidate)
                     and story_is_reasonable(candidate, duration))
 
-        result = revised_story(write(prompt, data, valid_revision, 1700))
+        result = revised_story(write(prompt, data, valid_revision))
     else:
         old_lines = {normalize(line) for line in data["setup"] + data["ending"]}
 
@@ -235,6 +216,6 @@ if __name__ == "__main__":
         context = {"hooks": data["hooks"], "setup": data["setup"],
                    "previous ending to avoid": " ".join(data["ending"]),
                    "ending word target": max(22, target - sum(len(line.split()) for line in data["setup"]))}
-        result = write(TWIST_PROMPT, context, valid_twist, 1100)
+        result = write(TWIST_PROMPT, context, valid_twist)
         result["ending"] = new_lines(result["ending"])
     print(json.dumps(result))

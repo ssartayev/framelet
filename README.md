@@ -2,49 +2,63 @@
 
 A local prototype that turns a short idea into a six-second vertical film. Type an idea or choose **Surprise me**, approve the pitch, then generate and download the film. The prototype makes three two-second shots.
 
-## Run on Apple Silicon
+## Cloud story studio
 
-Use macOS 26 and Python 3.11 or later. From this folder, run:
+[Reddit Stories](http://127.0.0.1:8765/stories.html) writes and edits short scripts
+through Groq or Gemini. ElevenLabs supplies narration and character timestamps
+in one request. FFmpeg assembles the captioned video on the server. This mode
+runs without model weights, MLX, or a GPU.
+
+Set `GROQ_API_KEY` or `GEMINI_API_KEY`, `ELEVENLABS_API_KEY`, and the ElevenLabs
+voice IDs `FRAMELET_ELEVENLABS_VOICE_EN` and/or `FRAMELET_ELEVENLABS_VOICE_RU`
+in the server environment. Choose a voice recorded in the corresponding language.
+
+For a local check of the cloud flow:
+
+```bash
+bash setup.sh --stories-only
+runtime/venv/bin/python app.py --stories-only
+```
+
+For a Linux deployment, build the included `Dockerfile` and configure the same
+environment variables through the host's secret settings. The container opens
+the story studio at `/` and listens on `PORT` (default `8765`). Put the service
+behind your hosting provider's access control so visitors cannot spend your API
+quota. Generated files live in `runtime/renders/`. Job state resets when the
+process restarts.
+
+With both keys configured, the writer starts with Groq and tries Gemini if the
+request or output fails. Set `FRAMELET_STORY_DRAFT_PROVIDER`,
+`FRAMELET_STORY_TWIST_PROVIDER`, or `FRAMELET_STORY_REWRITE_PROVIDER` to pin a task
+to `groq` or `gemini`. Model IDs are configurable with `FRAMELET_GROQ_MODEL` and
+`FRAMELET_GEMINI_MODEL`.
+
+With both writer keys set, compare drafts, alternate endings, and targeted edits
+in English and Russian:
+
+```bash
+runtime/venv/bin/python scripts/compare_story_writers.py --repeats 3
+```
+
+The JSON report under `runtime/` includes the generated text, errors, and elapsed
+time. Read the outputs for coherence, engagement, natural phrasing, and whether
+edits respected the source before assigning a provider to a task.
+
+Choose a linked premise or paste source text, then write a draft. Each premise
+also has a prepared 30-second Russian version. Apply an edit, read the revised
+script, then preview the selected opening or export the full video. Edit
+[STORY_RULES.md](STORY_RULES.md) to tune the writing rules.
+
+## Experimental AI Video tab
+
+The separate AI Video prototype uses Qwen3, Wan, and macOS narration to render
+three two-second shots. To run it on Apple Silicon with macOS 26 and Python 3.11
+or later:
 
 ```bash
 bash setup.sh
 runtime/venv/bin/python app.py
 ```
 
-Open [http://127.0.0.1:8765](http://127.0.0.1:8765). The server listens on loopback only. Setup downloads roughly 5 GB of public model files. Generation runs locally and the model downloads require no API key. Allow one render at a time on this machine.
-
-Qwen3 writes the pitch and three shots. Wan 2.1 through stable-diffusion.cpp generates draft footage at 192 × 336. macOS supplies narration, and FFmpeg burns in captions and exports a 360 × 640 MP4. Each shot uses a standalone prompt, so recurring objects can change appearance between shots.
-
-Completed films and render logs are in `runtime/renders/`. Jobs in the page reset when the server restarts. Use a film's download button or keep its MP4 from the renders folder.
-
-[Reddit Stories](http://127.0.0.1:8765/stories.html) uses Qwen3.5 to plan and write fictional stories, Qwen3-TTS for expressive narration, and Whisper for word timing. It previews three openings and exports a captioned short over an original arcade background. The story models add about 5.4 GB to setup.
-
-Choose **English** or **Русский** for the script, narration and captions, then choose 30 seconds, 1 minute or 2 minutes. If you installed the project before Russian support was added, run `bash setup.sh` again to install the multilingual caption model. Actual length can vary with the narration and any new ending.
-
-For cloud narration, set `ELEVENLABS_API_KEY` in the server environment and set
-`FRAMELET_ELEVENLABS_VOICE_EN` and/or `FRAMELET_ELEVENLABS_VOICE_RU` to the ElevenLabs
-voice IDs you want to use for each language. Choose a voice recorded in that language.
-Restart Framelet and select **ElevenLabs** under Narrator. The service receives the story text
-and generates each opening preview and the final narration. Subtitle alignment runs locally.
-
-Set `GROQ_API_KEY` or `GEMINI_API_KEY` in the server environment to write stories
-through an API. If both are set, Framelet defaults to Groq. Set
-`FRAMELET_STORY_DRAFT_PROVIDER` and `FRAMELET_STORY_TWIST_PROVIDER` independently
-to `groq`, `gemini`, or `local`. Without either key, Framelet defaults to the
-local writer. The API model defaults are `openai/gpt-oss-120b` and
-`gemini-3.8-flash`, configurable with `FRAMELET_GROQ_MODEL` and
-`FRAMELET_GEMINI_MODEL`.
-
-To compare both providers, export both keys and run
-`runtime/venv/bin/python scripts/compare_story_writers.py`. The report in
-`runtime/story-provider-comparison.json` records English and Russian drafts,
-alternate endings, request errors, and elapsed time.
-
-Edit [STORY_RULES.md](STORY_RULES.md) to tune plot structure, openings, and endings.
-Framelet loads the rules for each draft and alternate ending.
-
-Choose a linked premise or paste source text, then write a draft. Each premise
-also has a prepared 30-second Russian version you can open immediately. Read the story
-before recording anything. Apply an edit to the opening, ending, characters, or
-any other part, then preview the selected opening or export the full video.
-Set `FRAMELET_STORY_REWRITE_PROVIDER` to choose a provider for edits separately.
+This setup downloads the AI Video models. The cloud story deployment serves the
+story studio only.

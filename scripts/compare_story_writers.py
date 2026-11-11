@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import time
+from statistics import median
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -23,6 +24,19 @@ CASES = [
         "ending": ["Они собирали деньги на мой подарок.", "В конверте лежали билеты на концерт."],
     }),
 ]
+
+
+for language, story, instruction in (
+    ("en", CASES[2][2], "Reveal why the landlord asked the neighbour to keep this secret."),
+    ("ru", CASES[3][2], "Пусть сестра прямо объяснит, зачем она пришла в кафе."),
+):
+    draft = {"title": "A receipt" if language == "en" else "Конверт", **story}
+    draft["hooks"] = (
+        ["My neighbour paid my bill without asking.", "I found someone else's payment on my account.", "The receipt showed a payment I hadn't made."]
+        if language == "en" else
+        ["Я увидела мужа с сестрой в кафе.", "Муж и сестра сидели за одним столиком.", "На столе между ними лежал конверт с моим именем."]
+    )
+    CASES.append(("rewrite", language, {"story": draft, "scope": "ending", "instruction": instruction}))
 
 
 def run_provider(provider, cases):
@@ -53,9 +67,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--quick", action="store_true", help="Run one draft per provider to check connectivity.")
     parser.add_argument("--provider", choices=("groq", "gemini"), help="Run just one provider.")
+    parser.add_argument("--repeats", type=int, default=1, choices=range(1, 6),
+                        help="Repeat each case to measure consistency.")
     options = parser.parse_args()
     providers = (options.provider,) if options.provider else ("groq", "gemini")
-    cases = CASES[:1] if options.quick else CASES
+    cases = (CASES[:1] if options.quick else CASES) * options.repeats
     keys = [f"{provider.upper()}_API_KEY" for provider in providers]
     missing = [name for name in keys if not os.environ.get(name, "").strip()]
     if missing:
@@ -69,4 +85,10 @@ if __name__ == "__main__":
     report = ROOT / "runtime" / filename
     report.parent.mkdir(exist_ok=True)
     report.write_text(json.dumps(results, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    for provider, rows in results.items():
+        for action in dict.fromkeys(row["action"] for row in rows):
+            attempts = [row for row in rows if row["action"] == action]
+            successful = [row["seconds"] for row in attempts if "output" in row]
+            latency = f", median {median(successful):.2f}s" if successful else ""
+            print(f"{provider} / {action}: {len(successful)}/{len(attempts)} valid{latency}")
     print(f"Results saved to {report}")

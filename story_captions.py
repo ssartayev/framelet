@@ -1,12 +1,11 @@
 """Align story captions to narration and render short, animated groups."""
+import math
 import re
 from difflib import SequenceMatcher
-from functools import lru_cache
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 FONT_DIR = ROOT / "assets/fonts"
-TIMING_MODELS = {"en": ROOT / "runtime/models/word-timing", "ru": ROOT / "runtime/models/word-timing-multi"}
 
 HEADER = """[Script Info]
 ScriptType: v4.00+
@@ -23,11 +22,30 @@ Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
 """
 
 
-@lru_cache(maxsize=2)
-def timing_engine(language):
-    from mlx_audio.stt.utils import load_model
-
-    return load_model(TIMING_MODELS[language])
+def alignment_words(alignment, duration):
+    """Convert ElevenLabs character offsets to word starts."""
+    characters = alignment["characters"]
+    starts = alignment["character_start_times_seconds"]
+    if not characters or len(characters) != len(starts):
+        raise ValueError("Missing character timing")
+    words = []
+    pending = []
+    for char, start in zip(characters, starts):
+        if not isinstance(char, str) or len(char) != 1 or not math.isfinite(start) or not 0 <= start <= duration + 0.1:
+            raise ValueError("Invalid character timing")
+        if char.isspace():
+            if pending:
+                words.append({"word": "".join(pending), "start": word_start})
+                pending = []
+        else:
+            if not pending:
+                word_start = start
+            pending.append(char)
+    if pending:
+        words.append({"word": "".join(pending), "start": word_start})
+    if not words or any(first["start"] > second["start"] for first, second in zip(words, words[1:])):
+        raise ValueError("Invalid word timing")
+    return [word for word in words if token(word["word"])]
 
 
 def token(text):
@@ -78,13 +96,17 @@ def caption_groups(words, font):
         yield group
 
 
-def write_captions(directory, cues, tempo=1, language="en"):
+def write_captions(directory, cues, heard, tempo=1, language="en"):
     from PIL import ImageFont
 
-    audio = timing_engine(language).generate(str(directory / "narration.wav"), language=language, word_timestamps=True)
-    heard = [word for segment in audio.segments for word in segment.get("words", []) if token(word["word"])]
-    font_path = (Path("/System/Library/Fonts/Supplemental/Arial Bold.ttf") if language == "ru"
-                 else FONT_DIR / "Bangers-Regular.ttf")
+    font_path = FONT_DIR / "Bangers-Regular.ttf"
+    font_name = "Bangers"
+    if language == "ru":
+        font_path = Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
+        font_name = "DejaVu Sans"
+        if not font_path.is_file():
+            font_path = Path("/System/Library/Fonts/Supplemental/Arial Bold.ttf")
+            font_name = "Arial"
     font = ImageFont.truetype(str(font_path), 54)
     events = []
     for start, end, line in cues:
@@ -109,6 +131,6 @@ def write_captions(directory, cues, tempo=1, language="en"):
                 events.append(f"Dialogue: 0,{timestamp(begin / tempo)},{timestamp(finish / tempo)},Story,,0,0,0,,"
                               + prefix + " ".join(colored))
             cursor += len(group)
-    header = HEADER.format(font_name="Arial" if language == "ru" else "Bangers",
+    header = HEADER.format(font_name=font_name,
                            bold=-1 if language == "ru" else 0)
     (directory / "story.ass").write_text(header + "\n".join(events) + "\n", encoding="utf-8")

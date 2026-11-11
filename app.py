@@ -3,6 +3,7 @@ import json
 import os
 import random
 import re
+import shutil
 import subprocess
 import sys
 import textwrap
@@ -20,7 +21,7 @@ ROOT = Path(__file__).resolve().parent
 RUNTIME = ROOT / "runtime"
 MODELS = RUNTIME / "models"
 BIN = RUNTIME / "bin"
-FFMPEG = BIN / "ffmpeg"
+FFMPEG = os.environ.get("FRAMELET_FFMPEG") or shutil.which("ffmpeg") or BIN / "ffmpeg"
 VIDEO_MODEL = RUNTIME / "wan"
 ENGINE = VIDEO_MODEL / "bin/sd-cli"
 OUTPUT = RUNTIME / "renders"
@@ -132,6 +133,8 @@ def wrap_caption(text):
 
 
 class App(SimpleHTTPRequestHandler):
+    stories_only = False
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(ROOT / "dist"), **kwargs)
 
@@ -200,14 +203,19 @@ class App(SimpleHTTPRequestHandler):
         path = urlsplit(self.path).path
         if self.serve_render_asset(path):
             return
-        if path == "/api/status":
-            self.send_json(HTTPStatus.OK, model_status())
+        if self.stories_only and path in ("/", "/index.html"):
+            self.send_response(HTTPStatus.FOUND)
+            self.send_header("Location", "/stories.html")
+            self.end_headers()
+        elif path == "/api/status":
+            self.send_json(HTTPStatus.OK, {"writer": False, "video": False} if self.stories_only else model_status())
         elif path == "/api/stories/options":
             ready_by_language = {
                 language: stories.ready(language) for language in stories.LANGUAGES
             }
             self.send_json(HTTPStatus.OK, {
                 "voices": stories.VOICES, "categories": stories.CATEGORIES,
+                "storiesOnly": self.stories_only,
                 "backgrounds": stories.CLIPS, "languages": stories.LANGUAGES,
                 "voicesByLanguage": {language: stories.available_voices(language)
                                      for language in stories.LANGUAGES},
@@ -229,9 +237,10 @@ class App(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         path = urlsplit(self.path).path
-        if self.headers.get("Origin") not in (None, f"http://{self.headers.get('Host')}"):
-            return self.send_json(HTTPStatus.FORBIDDEN, {"error": "Use the local studio page."})
-        if path == "/api/pitch":
+        host = self.headers.get("Host")
+        if self.headers.get("Origin") not in (None, f"http://{host}", f"https://{host}"):
+            return self.send_json(HTTPStatus.FORBIDDEN, {"error": "Use the Framelet studio page."})
+        if path == "/api/pitch" and not self.stories_only:
             return self.create_pitch()
         if path == "/api/stories":
             return self.create_story()
@@ -239,7 +248,7 @@ class App(SimpleHTTPRequestHandler):
         if story_action:
             return self.change_story(*story_action.groups())
         match = re.fullmatch(r"/api/jobs/([a-f0-9]{32})/render", path)
-        if not match:
+        if not match or self.stories_only:
             return self.send_json(HTTPStatus.NOT_FOUND, {"error": "Endpoint not found."})
         if not model_status()["video"]:
             return self.send_json(HTTPStatus.SERVICE_UNAVAILABLE,
@@ -295,7 +304,7 @@ class App(SimpleHTTPRequestHandler):
         except (ValueError, KeyError, TypeError):
             return self.send_json(HTTPStatus.BAD_REQUEST, {"error": "Select a genre, narrator, and length of 30, 60, or 120 seconds."})
         if not stories.ready(language, voice, needs_writer=prepared_story is None):
-            return self.send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "Finish local story setup first."})
+            return self.send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "Configure a cloud writer key and an ElevenLabs voice for this language."})
         job_id = uuid.uuid4().hex
         (OUTPUT / job_id).mkdir()
         with LOCK:
@@ -362,8 +371,11 @@ class App(SimpleHTTPRequestHandler):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8765")))
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--stories-only", action="store_true", help="Serve only the cloud story studio.")
     options = parser.parse_args()
     OUTPUT.mkdir(parents=True, exist_ok=True)
-    print(f"Framelet Studio · http://127.0.0.1:{options.port}", flush=True)
-    ThreadingHTTPServer(("127.0.0.1", options.port), App).serve_forever()
+    App.stories_only = options.stories_only
+    print(f"Framelet Studio · http://{options.host}:{options.port}", flush=True)
+    ThreadingHTTPServer((options.host, options.port), App).serve_forever()

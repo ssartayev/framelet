@@ -1,11 +1,12 @@
 """Local story drafting, narration and video export."""
+import base64
+import binascii
 import json
 import os
 import ssl
 import subprocess
 import sys
 import wave
-from functools import lru_cache
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
@@ -13,28 +14,22 @@ from urllib.request import Request, urlopen
 
 import certifi
 
-from story_captions import FONT_DIR, TIMING_MODELS, write_captions
+from story_captions import FONT_DIR, alignment_words, write_captions
 from story_validation import story_is_reasonable
-from story_writer import MODEL as DEFAULT_STORY_MODEL, valid_story, writer_provider
+from story_writer import valid_story, writer_provider
 
 ROOT = Path(__file__).resolve().parent
-MODELS = ROOT / "runtime/models"
 PREMISES = {
     entry["id"]: entry
     for entry in json.loads((ROOT / "assets/story-premises.json").read_text(encoding="utf-8"))
 }
-VOICE_MODEL = MODELS / "narrator"
 BACKGROUNDS = ROOT / "dist/backgrounds"
 CATEGORIES = ("Relationship drama", "Family secrets", "Workplace revenge", "Awkward encounters", "Unexpected kindness")
 DURATIONS = (30, 60, 120)
 LANGUAGES = {"en": "English", "ru": "Русский"}
-VOICES = {"af_heart": "Vivian", "am_michael": "Aiden", "bf_emma": "Ryan"}
+VOICES = {"elevenlabs": "ElevenLabs"}
 CLIPS = {"neon": "Neon city", "desert": "Desert drive"}
 RATE = 24000
-LOCAL_STYLE = {
-    "en": "Read in a calm, conversational voice, as if telling a friend what happened.",
-    "ru": "Рассказывай спокойно и естественно, как в разговоре с другом.",
-}
 
 
 def cloud_voice(language):
@@ -42,20 +37,15 @@ def cloud_voice(language):
 
 
 def available_voices(language):
-    voices = {}
     if os.environ.get("ELEVENLABS_API_KEY", "").strip() and cloud_voice(language):
-        voices["elevenlabs"] = "ElevenLabs"
-    if all((VOICE_MODEL / name).is_file() for name in (
-        "model.safetensors", "speech_tokenizer/model.safetensors",
-    )):
-        voices.update(VOICES)
-    return voices
+        return VOICES.copy()
+    return {}
 
 
 def cloud_narration(text, language):
     voice_id = quote(cloud_voice(language), safe="")
     request = Request(
-        f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}?output_format=pcm_24000",
+        f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}/with-timestamps?output_format=pcm_24000",
         data=json.dumps({
             "text": text,
             "model_id": "eleven_multilingual_v2",
@@ -65,7 +55,7 @@ def cloud_narration(text, language):
     )
     try:
         with urlopen(request, timeout=90, context=ssl.create_default_context(cafile=certifi.where())) as response:
-            pcm = response.read()
+            payload = json.load(response)
     except HTTPError as error:
         raise NarrationError(f"ElevenLabs returned HTTP {error.code}. Check the API key, voice ID, and credits.") from None
     except URLError as error:
@@ -74,9 +64,17 @@ def cloud_narration(text, language):
         raise NarrationError("Could not reach ElevenLabs. Check your connection and try again.") from None
     except TimeoutError:
         raise NarrationError("ElevenLabs took too long to respond. Please try again.") from None
-    if not pcm or len(pcm) % 2:
-        raise NarrationError("ElevenLabs returned invalid audio.")
-    return pcm
+    except ValueError:
+        raise NarrationError("ElevenLabs returned an unreadable response.") from None
+    try:
+        pcm = base64.b64decode(payload["audio_base64"], validate=True)
+        if not pcm or len(pcm) % 2:
+            raise ValueError
+        alignment = payload.get("alignment") or payload["normalized_alignment"]
+        words = alignment_words(alignment, len(pcm) / (2 * RATE))
+    except (KeyError, TypeError, ValueError, binascii.Error):
+        raise NarrationError("ElevenLabs returned invalid audio or caption timing.") from None
+    return pcm, words
 
 
 class NarrationError(Exception):
@@ -84,78 +82,24 @@ class NarrationError(Exception):
 
 
 def ready(language="en", voice=None, *, needs_writer=True):
-    timing_model = TIMING_MODELS[language]
     voices = available_voices(language)
     voice_ready = bool(voices) if voice is None else voice in voices
-    model_path = Path(os.environ.get("FRAMELET_STORY_MODEL", str(DEFAULT_STORY_MODEL)))
     provider = writer_provider("draft", os.environ)
-    writer_ready = (
-        (model_path / "model.safetensors").is_file() or any(model_path.glob("model-*.safetensors"))
-        if provider == "local"
-        else provider in ("groq", "gemini") and bool(os.environ.get(f"{provider.upper()}_API_KEY", "").strip())
-    )
-    return voice_ready and (writer_ready or not needs_writer) and all(path.is_file() for path in (
-        timing_model / "weights.npz",
-        timing_model / "config.json", timing_model / "tokenizer.json", timing_model / "preprocessor_config.json",
-    ))
-
-
-@lru_cache(maxsize=1)
-def voice_engine():
-    from mlx_audio.tts.utils import load_model
-
-    return load_model(VOICE_MODEL)
+    writer_ready = provider in ("groq", "gemini") and bool(os.environ.get(f"{provider.upper()}_API_KEY", "").strip())
+    return voice_ready and (writer_ready or not needs_writer)
 
 
 def narrate(directory, filename, lines, voice, language="en"):
+    if voice not in available_voices(language):
+        raise NarrationError("Configure ElevenLabs and a voice for the selected language.")
     lines = [line.strip() for line in lines]
     lines = [line if line.rstrip('»"”').endswith((".", "!", "?", "…")) else line + "." for line in lines]
-    if voice == "elevenlabs":
-        script = " ".join(lines)
-        pcm = cloud_narration(script, language)
-        with wave.open(str(directory / filename), "wb") as audio:
-            audio.setparams((1, 2, RATE, 0, "NONE", "not compressed"))
-            audio.writeframes(pcm)
-        return [(0, len(pcm) / (2 * RATE), script)]
-
-    import numpy as np
-
-    narrator = voice_engine()
-    cues = []
-    sample_offset = 0
+    script = " ".join(lines)
+    pcm, words = cloud_narration(script, language)
     with wave.open(str(directory / filename), "wb") as audio:
         audio.setparams((1, 2, RATE, 0, "NONE", "not compressed"))
-        for line in narration_chunks(lines):
-            chunks = list(narrator.generate_custom_voice(
-                text=line, speaker=VOICES[voice], language="russian" if language == "ru" else "english",
-                instruct=LOCAL_STYLE[language], temperature=0.65, max_tokens=420,
-            ))
-            if not chunks or any(chunk.sample_rate != RATE for chunk in chunks):
-                raise ValueError("Unexpected narration audio")
-            samples = np.concatenate([np.asarray(chunk.audio).reshape(-1) for chunk in chunks])
-            audible = np.flatnonzero(np.abs(samples) > max(0.002, float(np.max(np.abs(samples))) * 0.015))
-            if not audible.size:
-                raise ValueError("The narrator produced silent audio")
-            samples = samples[max(0, audible[0] - 720):audible[-1] + 2160]
-            pcm = (np.clip(samples, -1, 1) * 32767).astype("<i2")
-            audio.writeframes(pcm.tobytes())
-            cues.append((sample_offset / RATE, (sample_offset + len(pcm)) / RATE, line))
-            sample_offset += len(pcm)
-            silence = round(0.12 * RATE)
-            audio.writeframes(bytes(silence * 2))
-            sample_offset += silence
-    return cues
-
-
-def narration_chunks(lines):
-    paragraph = ""
-    for line in lines:
-        if paragraph and len(paragraph) + 1 + len(line) > 100:
-            yield paragraph
-            paragraph = ""
-        paragraph = f"{paragraph} {line}" if paragraph else line
-    if paragraph:
-        yield paragraph
+        audio.writeframes(pcm)
+    return [(0, len(pcm) / (2 * RATE), script)], words
 
 
 def write_story(action, data, env):
@@ -168,7 +112,7 @@ def write_story(action, data, env):
         detail = error.stderr.strip()
         if detail.startswith(("Groq ", "Gemini ", "Story writer ")) and "\n" not in detail:
             raise NarrationError(detail) from error
-        raise NarrationError("The local writer could not create a concise story. Try another idea.") from error
+        raise NarrationError("The story writer could not finish. Try another idea.") from error
     return json.loads(result.stdout.splitlines()[-1])
 
 
@@ -209,14 +153,14 @@ def process(action, data, directory, ffmpeg, env, update):
             if not story_is_reasonable(story, data["duration"]):
                 raise NarrationError("The story was too long or repetitive. Please generate a new one.")
             update(status="rendering", detail="Recording the narration…")
-            cues = narrate(directory, "narration.wav", [story["hooks"][data["hook"]], *story["setup"], *story["ending"]], data["voice"], language)
+            cues, words = narrate(directory, "narration.wav", [story["hooks"][data["hook"]], *story["setup"], *story["ending"]], data["voice"], language)
             update(status="rendering", detail="Timing captions to the narration…")
             with wave.open(str(directory / "narration.wav")) as narration:
                 spoken_duration = narration.getnframes() / RATE
             if spoken_duration > data["duration"] * 1.5:
                 raise NarrationError("The narration is too long for the selected duration. Please generate a new story.")
             tempo = min(1.2, max(0.85, spoken_duration / data["duration"]))
-            write_captions(directory, cues, tempo, language)
+            write_captions(directory, cues, words, tempo, language)
             update(status="rendering", detail="Exporting your short…")
             with (directory / "story-render.log").open("w") as log:
                 subprocess.run([
