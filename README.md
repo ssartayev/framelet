@@ -42,3 +42,9 @@ alternate endings, request errors, and elapsed time.
 
 Edit [STORY_RULES.md](STORY_RULES.md) to tune plot structure, openings, and endings.
 Framelet loads the rules for each draft and alternate ending.
+
+Choose a linked premise or paste source text, then write a draft. Each premise
+also has a prepared 30-second Russian version you can open immediately. Read the story
+before recording anything. Apply an edit to the opening, ending, characters, or
+any other part, then preview the selected opening or export the full video.
+Set `FRAMELET_STORY_REWRITE_PROVIDER` to choose a provider for edits separately.

@@ -102,6 +102,7 @@ def valid_story(value):
         and all(isinstance(value.get(key), list) and value[key]
                 and all(isinstance(line, str) and line.strip() for line in value[key])
                 for key in ("hooks", "setup", "ending"))
+        and len({normalize(hook) for hook in value["hooks"]}) == 3
     )
 
 
@@ -186,6 +187,38 @@ if __name__ == "__main__":
             lambda value: valid_story(value) and story_is_reasonable(value, duration),
             {30: 650, 60: 1000, 120: 1700}[duration],
         )
+    elif action == "rewrite":
+        original = data["story"]
+        scope = data["scope"]
+        section = {"opening": "hooks", "ending": "ending"}.get(scope)
+        instructions = {
+            "opening": "Rewrite only the three alternative openings. Each must lead into the unchanged setup.",
+            "ending": "Rewrite only the ending. Resolve a clue already in the setup. Keep the openings and setup fixed.",
+            "characters": "Apply the requested character change throughout. Preserve the core conflict and timeline.",
+            "custom": "Apply the requested edit, keeping the rest of the story as close to the original as possible.",
+        }
+        output_format = (f"Return only JSON with {section}, an array of short sentences." if section
+                         else "Return only JSON with title, three hooks, setup, and ending.")
+        prompt = (
+            f"Revise the existing fictional story. {instructions[scope]} {output_format} "
+            f"The complete spoken story should be around {target} words. "
+            "Keep the narrator's point of view, character relationships, and facts consistent. "
+            "Make a substantive change that follows the edit request."
+        )
+
+        def revised_story(value):
+            if section:
+                return {**original, section: value.get(section)}
+            return value
+
+        def valid_revision(value):
+            if not isinstance(value, dict):
+                return False
+            candidate = revised_story(value)
+            return (candidate != original and valid_story(candidate)
+                    and story_is_reasonable(candidate, duration))
+
+        result = revised_story(write(prompt, data, valid_revision, 1700))
     else:
         old_lines = {normalize(line) for line in data["setup"] + data["ending"]}
 

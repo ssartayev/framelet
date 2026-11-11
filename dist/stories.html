@@ -22,7 +22,7 @@
       <section class="intro">
         <div class="kicker">FICTIONAL STORY SHORTS</div>
         <h1>Every story has <em>a twist.</em></h1>
-        <p>Pick a genre and narrator. Hear three openings, choose your favorite, and turn the story into a captioned short.</p>
+        <p>Choose a premise or paste a story. Revise the script, preview an opening, and export a captioned short.</p>
       </section>
       <div class="studio">
         <div class="workspace">
@@ -42,13 +42,16 @@
                   <option value="120">2 minutes</option>
                 </select>
               </label>
-              <label class="story-idea">Premises from Тучный Жаб
+              <label class="story-idea">Premises inspired by Тучный Жаб
                 <select id="story-premise"><option value="">Choose a premise or write your own</option></select>
               </label>
               <a id="premise-source" class="story-idea" target="_blank" rel="noopener noreferrer" hidden>Watch the source episode ↗</a>
-              <label class="story-idea" for="story-idea">Your idea <span>(optional)</span></label>
-              <textarea id="story-idea" maxlength="500" rows="3" placeholder="My sister knew something about my husband that I didn't…"></textarea>
-              <div class="actions"><button id="draft" class="primary" disabled>Write story <span aria-hidden="true">↗</span></button></div>
+              <label class="story-idea" for="story-idea">Premise or source text <span>(optional)</span></label>
+              <textarea id="story-idea" maxlength="4000" rows="4" placeholder="My sister knew something about my husband that I didn't…"></textarea>
+              <div class="actions">
+                <button id="draft" class="primary" disabled>Write story <span aria-hidden="true">↗</span></button>
+                <button id="prepared-draft" type="submit" class="secondary" hidden>Open 30-second Russian draft</button>
+              </div>
             </form>
           </section>
           <section class="card" id="story-card" hidden>
@@ -56,10 +59,27 @@
             <h2 id="story-title"></h2>
             <p id="story-narrator" class="preview-label"></p>
             <fieldset class="story-hooks">
-              <legend>Hear three hooks</legend>
+              <legend>Choose an opening</legend>
               <div id="hooks"></div>
             </fieldset>
-            <details id="story-details"><summary>Read the story</summary><p id="setup"></p><p id="ending"></p></details>
+            <div class="actions">
+              <button id="preview-hook" type="button" class="secondary">Preview selected opening</button>
+            </div>
+            <audio id="hook-preview" controls preload="none" aria-label="Selected opening preview" hidden></audio>
+            <details id="story-details" open><summary>Read the story</summary><p id="setup"></p><p id="ending"></p></details>
+            <form id="rewrite-form">
+              <label class="story-idea">What should change?
+                <select id="edit-scope">
+                  <option value="opening">Opening</option>
+                  <option value="ending">Ending</option>
+                  <option value="characters">Characters</option>
+                  <option value="custom">Anything else</option>
+                </select>
+              </label>
+              <label class="sr-only" for="edit-request">Edit request</label>
+              <textarea id="edit-request" rows="2" maxlength="600" required placeholder="Example: Let the sister explain what happened at the café."></textarea>
+              <div class="actions"><button id="rewrite" type="submit" class="secondary">Apply edit</button></div>
+            </form>
             <div class="actions">
               <button id="export" type="button" class="primary">Generate short <span aria-hidden="true">▶</span></button>
               <button id="twist" type="button" class="secondary">Change the twist</button>
@@ -79,7 +99,7 @@
         </section>
       </div>
     </main>
-    <footer><span>FRAMELET / LOCAL PROTOTYPE</span><span>NO API CREDITS REQUIRED</span></footer>
+    <footer><span>FRAMELET / LOCAL PROTOTYPE</span></footer>
   </div>
 </body>
 </html>

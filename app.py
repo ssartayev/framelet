@@ -212,6 +212,11 @@ class App(SimpleHTTPRequestHandler):
                 "voicesByLanguage": {language: stories.available_voices(language)
                                      for language in stories.LANGUAGES},
                 "readyByLanguage": ready_by_language, "ready": ready_by_language["en"],
+                "preparedStoryReady": stories.ready("ru", needs_writer=False),
+                "premises": [
+                    {field: entry[field] for field in ("id", "title", "idea", "category", "source")}
+                    for entry in stories.PREMISES.values()
+                ],
             })
         elif path.startswith("/api/jobs/"):
             job_id = path.removeprefix("/api/jobs/")
@@ -230,7 +235,7 @@ class App(SimpleHTTPRequestHandler):
             return self.create_pitch()
         if path == "/api/stories":
             return self.create_story()
-        story_action = re.fullmatch(r"/api/stories/([a-f0-9]{32})/(twist|render)", path)
+        story_action = re.fullmatch(r"/api/stories/([a-f0-9]{32})/(twist|rewrite|preview|render)", path)
         if story_action:
             return self.change_story(*story_action.groups())
         match = re.fullmatch(r"/api/jobs/([a-f0-9]{32})/render", path)
@@ -253,9 +258,9 @@ class App(SimpleHTTPRequestHandler):
         WORKER.submit(render, job_id, plan)
         self.send_json(HTTPStatus.ACCEPTED, {"id": job_id})
 
-    def read_body(self):
+    def read_body(self, limit=8192):
         size = int(self.headers.get("Content-Length", 0))
-        if not 0 < size <= 8192:
+        if not 0 < size <= limit:
             raise ValueError
         data = json.loads(self.rfile.read(size))
         if not isinstance(data, dict):
@@ -269,7 +274,7 @@ class App(SimpleHTTPRequestHandler):
 
     def create_story(self):
         try:
-            data = self.read_body()
+            data = self.read_body(limit=25_000)
             idea, category, voice = data.get("idea", ""), data["category"], data["voice"]
             duration = data.get("duration", 60)
             language = data.get("language", "en")
@@ -277,13 +282,19 @@ class App(SimpleHTTPRequestHandler):
                 return self.send_json(HTTPStatus.BAD_REQUEST, {"error": "Choose a supported story language."})
             if type(duration) is not int or duration not in stories.DURATIONS:
                 raise ValueError
-            if (not isinstance(idea, str) or len(idea) > 500
+            prepared_story = None
+            if "premise" in data:
+                entry = stories.PREMISES.get(data["premise"])
+                if entry is None or language != "ru" or duration != 30:
+                    return self.send_json(HTTPStatus.BAD_REQUEST, {"error": "Choose a prepared 30-second Russian story."})
+                prepared_story = entry["story"]
+            if (not isinstance(idea, str) or len(idea) > 4000
                     or category not in stories.CATEGORIES
                     or voice not in stories.available_voices(language)):
                 raise ValueError
         except (ValueError, KeyError, TypeError):
             return self.send_json(HTTPStatus.BAD_REQUEST, {"error": "Select a genre, narrator, and length of 30, 60, or 120 seconds."})
-        if not stories.ready(language, voice):
+        if not stories.ready(language, voice, needs_writer=prepared_story is None):
             return self.send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "Finish local story setup first."})
         job_id = uuid.uuid4().hex
         (OUTPUT / job_id).mkdir()
@@ -291,18 +302,35 @@ class App(SimpleHTTPRequestHandler):
             JOBS[job_id] = {"kind": "story", "voice": voice, "duration": duration, "language": language,
                             "status": "queued", "detail": "Story queued…"}
         self.submit_story("draft", job_id, {"idea": idea.strip(), "category": category,
-                                           "voice": voice, "duration": duration, "language": language})
+                                           "voice": voice, "duration": duration, "language": language,
+                                           "prepared_story": prepared_story})
 
     def change_story(self, job_id, action):
         data = {}
-        if action == "render":
+        if action in ("render", "preview"):
             try:
-                data = self.read_body()
-                hook, background = data["hook"], data["background"]
-                if type(hook) is not int or not 0 <= hook < 3 or background not in stories.CLIPS:
+                request = self.read_body()
+                hook = request["hook"]
+                if type(hook) is not int or not 0 <= hook < 3:
                     raise ValueError
+                data = {"hook": hook}
+                if action == "render":
+                    background = request["background"]
+                    if background not in stories.CLIPS:
+                        raise ValueError
+                    data["background"] = background
             except (ValueError, KeyError, TypeError):
                 return self.send_json(HTTPStatus.BAD_REQUEST, {"error": "Choose a valid opening and background."})
+        elif action == "rewrite":
+            try:
+                request = self.read_body()
+                scope, instruction = request["scope"], request["instruction"]
+                if (scope not in ("opening", "ending", "characters", "custom")
+                        or not isinstance(instruction, str) or not 0 < len(instruction.strip()) <= 600):
+                    raise ValueError
+                data = {"scope": scope, "instruction": instruction.strip()}
+            except (ValueError, KeyError, TypeError):
+                return self.send_json(HTTPStatus.BAD_REQUEST, {"error": "Choose an edit type and enter up to 600 characters."})
         with LOCK:
             job = JOBS.get(job_id)
             if not job or job.get("kind") != "story" or "story" not in job or job["status"] not in ("pitch", "ready", "error"):

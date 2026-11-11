@@ -7,32 +7,16 @@ const film = get("story-film");
 const download = get("story-download");
 const notice = get("story-notice");
 const storyCard = get("story-card");
+const hookPreview = get("hook-preview");
 const premise = get("story-premise");
 const premiseSource = get("premise-source");
-const episodePremises = [
-  {
-    title: "За день до свадьбы",
-    idea: "Накануне свадьбы я узнал, что невеста мне изменила. Она просит прощения, а мне нужно решить, что сказать гостям и состоится ли свадьба.",
-    category: "Relationship drama",
-    source: "https://rutube.ru/video/5ba6eebb85c1443af5f6c3f343594d6b/",
-  },
-  {
-    title: "Сестра хочет мою свадьбу",
-    idea: "Моя сестра пытается забрать себе свадьбу, которую я уже спланировала. Семья ждёт, что я уступлю, но я решаю ответить ей.",
-    category: "Family secrets",
-    source: "https://rutube.ru/video/3d7da38082d9b406e6d37f859a3bfbad/",
-  },
-  {
-    title: "Что произошло после измены",
-    idea: "Я узнал, что жена мне изменила. Позже последствия её собственного решения изменили нашу жизнь, и я понял, что больше не хочу её выручать.",
-    category: "Relationship drama",
-    source: "https://rutube.ru/video/8149635564054ebd5cb81015958d8031/",
-  },
-];
+const preparedDraft = get("prepared-draft");
+let episodePremises = new Map();
+let preparedStoryReady = false;
 
-premise.append(...episodePremises.map((entry, index) => new Option(entry.title, String(index))));
 premise.addEventListener("change", () => {
-  const entry = premise.value === "" ? null : episodePremises[Number(premise.value)];
+  const entry = episodePremises.get(premise.value);
+  preparedDraft.hidden = !entry || !preparedStoryReady;
   premiseSource.hidden = !entry;
   if (!entry) {
     premiseSource.removeAttribute("href");
@@ -66,7 +50,9 @@ function announce(text, error = false) {
 
 function busy(state) {
   get("draft").disabled = state || !ready;
-  for (const id of ["genre", "narrator", "language", "duration", "background", "story-premise", "story-idea", "export", "twist"]) {
+  preparedDraft.disabled = state || !preparedStoryReady;
+  get("hooks").closest("fieldset").disabled = state;
+  for (const id of ["genre", "narrator", "language", "duration", "background", "story-premise", "story-idea", "export", "twist", "preview-hook", "edit-scope", "edit-request", "rewrite"]) {
     get(id).disabled = state;
   }
 }
@@ -98,7 +84,19 @@ async function runJob(request, target) {
   }
 }
 
-function showStory(story) {
+function selectedHook() {
+  return Number(get("hooks").querySelector("input:checked")?.value ?? 0);
+}
+
+function clearHookPreview() {
+  hookPreview.pause();
+  hookPreview.removeAttribute("src");
+  hookPreview.load();
+  hookPreview.hidden = true;
+}
+
+function showStory(story, selected = 0) {
+  clearHookPreview();
   get("story-title").textContent = story.title;
   get("setup").textContent = story.setup.join(" ");
   get("ending").textContent = story.ending.join(" ");
@@ -110,30 +108,28 @@ function showStory(story) {
     radio.type = "radio";
     radio.name = "hook";
     radio.value = index;
-    radio.checked = index === 0;
+    radio.checked = index === selected;
+    radio.addEventListener("change", clearHookPreview);
     label.append(radio, document.createTextNode(hook));
-    const audio = document.createElement("audio");
-    audio.controls = true;
-    audio.preload = "none";
-    audio.src = `/hooks/${activeId}/hook-${index}.wav`;
-    audio.setAttribute("aria-label", `Opening ${index + 1}`);
-    audio.addEventListener("play", () => {
-      for (const other of get("hooks").querySelectorAll("audio")) {
-        if (other !== audio) other.pause();
-      }
-    });
-    row.append(label, audio);
+    row.append(label);
     return row;
   }));
+  get("story-details").open = true;
   storyCard.hidden = false;
 }
 
 get("story-form").addEventListener("submit", async (event) => {
   event.preventDefault();
+  const isPrepared = event.submitter === preparedDraft;
+  if (isPrepared) {
+    get("language").value = "ru";
+    get("duration").value = "30";
+    get("language").dispatchEvent(new Event("change"));
+  }
   const job = await runJob(() => api("/api/stories", {
     idea: get("story-idea").value.trim(), category: genre.value, voice: narrator.value,
-    duration: Number(get("duration").value),
-    language: get("language").value,
+    duration: Number(get("duration").value), language: get("language").value,
+    ...(isPrepared ? { premise: premise.value } : {}),
   }), "pitch");
   if (!job) return;
   activeId = job.id;
@@ -150,8 +146,35 @@ get("twist").addEventListener("click", async () => {
   showBackground();
 });
 
+get("rewrite-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const instruction = get("edit-request").value.trim();
+  if (!instruction) {
+    announce("Enter an edit request.", true);
+    return;
+  }
+  const hook = selectedHook();
+  const job = await runJob(() => api(`/api/stories/${activeId}/rewrite`, {
+    scope: get("edit-scope").value, instruction,
+  }), "pitch");
+  if (!job) return;
+  showStory(job.story, hook);
+  get("edit-request").value = "";
+  showBackground();
+});
+
+get("preview-hook").addEventListener("click", async () => {
+  clearHookPreview();
+  const job = await runJob(() => api(`/api/stories/${activeId}/preview`, { hook: selectedHook() }), "pitch");
+  if (!job) return;
+  hookPreview.src = `${job.preview}?v=${Date.now()}`;
+  hookPreview.hidden = false;
+  hookPreview.play().catch(() => {});
+});
+
 get("export").addEventListener("click", async () => {
-  const hook = Number(get("hooks").querySelector("input:checked").value);
+  hookPreview.pause();
+  const hook = selectedHook();
   const job = await runJob(() => api(`/api/stories/${activeId}/render`, {
     hook, background: background.value,
   }), "ready");
@@ -169,6 +192,9 @@ background.addEventListener("change", showBackground);
 
 try {
   const options = await api("/api/stories/options");
+  preparedStoryReady = options.preparedStoryReady;
+  episodePremises = new Map(options.premises.map((entry) => [entry.id, entry]));
+  premise.append(...options.premises.map((entry) => new Option(entry.title, entry.id)));
   genre.replaceChildren(...options.categories.map((name) => new Option(name, name)));
   get("language").replaceChildren(...Object.entries(options.languages).map(([id, name]) => new Option(name, id)));
   background.replaceChildren(...Object.entries(options.backgrounds).map(([id, name]) => new Option(name, id)));
@@ -176,7 +202,9 @@ try {
   function updateVoices() {
     const language = get("language").value;
     const voices = options.voicesByLanguage[language];
+    const previousVoice = narrator.value;
     narrator.replaceChildren(...Object.entries(voices).map(([id, name]) => new Option(name, id)));
+    if (Object.hasOwn(voices, previousVoice)) narrator.value = previousVoice;
     ready = options.readyByLanguage[language];
     get("story-status").textContent = ready ? "STORY STUDIO" : "MODEL SETUP";
     busy(false);
