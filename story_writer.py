@@ -8,6 +8,7 @@ import outlines
 from mlx_lm import load
 from pydantic import BaseModel, Field
 from writer import generate_json
+from story_validation import story_is_reasonable
 
 MODEL = Path(__file__).resolve().parent / "runtime/models/story-writer"
 
@@ -63,18 +64,21 @@ class Plot(BaseModel):
     choice: str
 
 
+StoryLine = Annotated[str, Field(max_length=120)]
+
+
 class Ending(BaseModel):
-    ending: list[str] = Field(min_length=3, max_length=13)
+    ending: list[StoryLine] = Field(min_length=3, max_length=13)
+
+
+ShortLine = Annotated[str, Field(max_length=76)]
 
 
 class Story(Ending):
     title: str
-    hooks: list[str] = Field(min_length=3, max_length=3)
-    setup: list[str] = Field(min_length=7, max_length=13)
-    ending: list[str] = Field(min_length=4, max_length=8)
-
-
-ShortLine = Annotated[str, Field(max_length=76)]
+    hooks: list[ShortLine] = Field(min_length=3, max_length=3)
+    setup: list[StoryLine] = Field(min_length=4, max_length=9)
+    ending: list[StoryLine] = Field(min_length=3, max_length=5)
 
 
 class ShortEnding(Ending):
@@ -88,8 +92,8 @@ class ShortStory(ShortEnding):
 
 
 class LongStory(Story):
-    setup: list[str] = Field(min_length=13, max_length=24)
-    ending: list[str] = Field(min_length=6, max_length=13)
+    setup: list[StoryLine] = Field(min_length=13, max_length=24)
+    ending: list[StoryLine] = Field(min_length=6, max_length=13)
 
 def text_list(value, minimum, maximum, word_limit):
     return isinstance(value, list) and minimum <= len(value) <= maximum and all(
@@ -134,7 +138,8 @@ if __name__ == "__main__":
         if duration == 30:
             context["delivery"] = "Use only one thought per line. Aim for 7 to 10 words per line."
         schema = {30: ShortStory, 60: Story, 120: LongStory}[duration]
-        result = write(STORY_PROMPT + style, context, schema, valid_story, 2400)
+        result = write(STORY_PROMPT + style, context, schema,
+                       lambda value: valid_story(value) and story_is_reasonable(value, duration), 2400)
         openings = {normalize(line) for line in result["hooks"]}
         setup = [line for line in result["setup"] if normalize(line) not in openings]
         if len(setup) >= 4:

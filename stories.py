@@ -14,6 +14,7 @@ from urllib.request import Request, urlopen
 import certifi
 
 from story_captions import FONT_DIR, TIMING_MODELS, write_captions
+from story_validation import story_is_reasonable
 
 ROOT = Path(__file__).resolve().parent
 MODELS = ROOT / "runtime/models"
@@ -144,10 +145,13 @@ def narration_chunks(lines):
 
 
 def write_story(action, data, env):
-    result = subprocess.run(
-        [sys.executable, ROOT / "story_writer.py", action], input=json.dumps(data),
-        capture_output=True, text=True, check=True, timeout=180, cwd=ROOT, env=env,
-    )
+    try:
+        result = subprocess.run(
+            [sys.executable, ROOT / "story_writer.py", action], input=json.dumps(data),
+            capture_output=True, text=True, check=True, timeout=180, cwd=ROOT, env=env,
+        )
+    except subprocess.CalledProcessError as error:
+        raise NarrationError("The local writer could not create a concise story. Try another idea.") from error
     return json.loads(result.stdout.splitlines()[-1])
 
 
@@ -158,6 +162,8 @@ def process(action, data, directory, ffmpeg, env, update):
             update(status="writing", detail="Writing your story and three openings…")
             story = write_story(action, {**{key: data[key] for key in ("category", "idea", "duration")},
                                          "language": language}, env)
+            if not story_is_reasonable(story, data["duration"]):
+                raise NarrationError("The story was too long or repetitive. Please generate a new one.")
             update(status="writing", detail="Recording your hook previews…")
             for index, hook in enumerate(story["hooks"]):
                 narrate(directory, f"hook-{index}.wav", [hook], data["voice"], language)
@@ -169,11 +175,15 @@ def process(action, data, directory, ffmpeg, env, update):
                    video=None)
         else:
             story = data["story"]
+            if not story_is_reasonable(story, data["duration"]):
+                raise NarrationError("The story was too long or repetitive. Please generate a new one.")
             update(status="rendering", detail="Recording the narration…")
             cues = narrate(directory, "narration.wav", [story["hooks"][data["hook"]], *story["setup"], *story["ending"]], data["voice"], language)
             update(status="rendering", detail="Timing captions to the narration…")
             with wave.open(str(directory / "narration.wav")) as narration:
                 spoken_duration = narration.getnframes() / RATE
+            if spoken_duration > data["duration"] * 1.5:
+                raise NarrationError("The narration is too long for the selected duration. Please generate a new story.")
             tempo = min(1.2, max(0.85, spoken_duration / data["duration"]))
             write_captions(directory, cues, tempo, language)
             update(status="rendering", detail="Exporting your short…")
