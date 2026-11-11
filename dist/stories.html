@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#171613">
+  <title>Reddit Stories — Framelet</title>
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/stories.js"></script>
+</head>
+<body>
+  <div class="shell">
+    <header>
+      <a class="brand" href="/" aria-label="Framelet home"><span class="brand-mark" aria-hidden="true">▶</span> framelet<span class="period">.</span></a>
+      <span class="local"><i></i> <span id="story-status">LOCAL STUDIO</span></span>
+    </header>
+    <nav class="service-tabs" aria-label="Framelet services">
+      <a href="/">AI Video</a>
+      <a href="/stories.html" aria-current="page">Reddit Stories</a>
+    </nav>
+    <main>
+      <section class="intro">
+        <div class="kicker">FICTIONAL STORY SHORTS</div>
+        <h1>Every story has <em>a twist.</em></h1>
+        <p>Pick a genre and narrator. Hear three openings, choose your favorite, and turn the story into a captioned short.</p>
+      </section>
+      <div class="studio">
+        <div class="workspace">
+          <section class="card">
+            <div class="step">01 / YOUR STORY</div>
+            <h2>Set the scene</h2>
+            <form id="story-form">
+              <div class="story-options">
+                <label>Genre<select id="genre" required></select></label>
+                <label>Narrator for new story<select id="narrator" required></select></label>
+              </div>
+              <label class="story-idea">Target length
+                <select id="duration">
+                  <option value="30">30 seconds</option>
+                  <option value="60" selected>1 minute</option>
+                  <option value="120">2 minutes</option>
+                </select>
+              </label>
+              <label class="story-idea" for="story-idea">Your idea <span>(optional)</span></label>
+              <textarea id="story-idea" maxlength="500" rows="3" placeholder="My sister knew something about my husband that I didn't…"></textarea>
+              <div class="actions"><button id="draft" class="primary" disabled>Write story <span aria-hidden="true">↗</span></button></div>
+            </form>
+          </section>
+          <section class="card" id="story-card" hidden>
+            <div class="step">02 / THE OPENING</div>
+            <h2 id="story-title"></h2>
+            <p id="story-narrator" class="preview-label"></p>
+            <fieldset class="story-hooks">
+              <legend>Hear three hooks</legend>
+              <div id="hooks"></div>
+            </fieldset>
+            <details id="story-details"><summary>Read the story</summary><p id="setup"></p><p id="ending"></p></details>
+            <div class="actions">
+              <button id="export" type="button" class="primary">Generate short <span aria-hidden="true">▶</span></button>
+              <button id="twist" type="button" class="secondary">Change the twist</button>
+            </div>
+          </section>
+          <p class="notice" id="story-notice" role="status" aria-live="polite" hidden></p>
+        </div>
+        <section class="preview card">
+          <div class="preview-head"><div><div class="step">03 / THE SHORT</div><h2>Screening room</h2></div><span class="ratio">9:16</span></div>
+          <label class="background-label">Background<select id="background"></select></label>
+          <div class="screen">
+            <video id="background-preview" autoplay muted loop playsinline aria-label="Background preview"></video>
+            <video id="story-film" controls playsinline preload="metadata" aria-label="Generated story short" hidden></video>
+          </div>
+          <p id="preview-label" class="preview-label">Background preview</p>
+          <a id="story-download" class="download" download="framelet-story.mp4" hidden>Download MP4 <span aria-hidden="true">↓</span></a>
+        </section>
+      </div>
+    </main>
+    <footer><span>FRAMELET / LOCAL PROTOTYPE</span><span>NO API CREDITS REQUIRED</span></footer>
+  </div>
+</body>
+</html>

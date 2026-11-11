@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#171613">
+  <title>Framelet — Local short-film studio</title>
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <div class="shell">
+    <header>
+      <a class="brand" href="/" aria-label="Framelet home"><span class="brand-mark" aria-hidden="true">▶</span> framelet<span class="period">.</span></a>
+      <span class="local" id="local-status"><i></i> <span>LOCAL STUDIO</span></span>
+    </header>
+    <nav class="service-tabs" aria-label="Framelet services">
+      <a href="/" aria-current="page">AI Video</a>
+      <a href="/stories.html">Reddit Stories</a>
+    </nav>
+    <main>
+      <section class="intro">
+        <div class="kicker">THE SHORT-FILM STUDIO</div>
+        <h1>Make a little <em>film.</em></h1>
+        <p>Start with an idea, or let Framelet find one for you. Get a short with AI-generated footage, narration and captions.</p>
+      </section>
+      <div class="studio">
+        <div class="workspace">
+          <section class="card" aria-labelledby="idea-heading">
+            <div class="step">01 / THE IDEA</div>
+            <h2 id="idea-heading">What should happen?</h2>
+            <form id="idea-form">
+              <label class="sr-only" for="idea">Describe your video idea</label>
+              <textarea id="idea" name="idea" maxlength="500" rows="4" placeholder="A tiny robot finds the last plant on Mars…"></textarea>
+              <div class="actions">
+                <button type="submit" id="pitch-button" class="primary">Write a pitch <span aria-hidden="true">↗</span></button>
+                <button type="button" id="surprise" class="secondary">Surprise me</button>
+              </div>
+            </form>
+          </section>
+          <section class="card" id="pitch-card" aria-labelledby="pitch-heading" hidden>
+            <div class="step">02 / THE PITCH</div>
+            <h2 id="pitch-heading"></h2>
+            <p id="pitch-text"></p>
+            <details id="shots"><summary>See the three shots</summary><ol id="shot-list"></ol></details>
+            <button type="button" class="primary" id="render-button">Generate film <span aria-hidden="true">▶</span></button>
+          </section>
+          <div class="notice" id="notice" role="status" aria-live="polite" hidden></div>
+        </div>
+        <section class="preview card" aria-labelledby="preview-heading">
+          <div class="preview-head">
+            <div><div class="step">03 / THE FILM</div><h2 id="preview-heading">Screening room</h2></div>
+            <span class="ratio">9:16</span>
+          </div>
+          <div class="screen">
+            <div id="placeholder">
+              <span class="viewfinder" aria-hidden="true">▶</span>
+              <strong id="screen-title">Your film goes here</strong>
+              <span id="screen-caption">Three shots, one short.</span>
+            </div>
+            <video id="film" controls playsinline preload="metadata" hidden aria-label="Generated film"></video>
+          </div>
+          <div class="progress" id="progress" hidden role="progressbar" aria-label="Render progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div></div></div>
+          <a id="download" class="download" download="framelet-film.mp4" hidden>Download MP4 <span aria-hidden="true">↓</span></a>
+        </section>
+      </div>
+    </main>
+    <footer><span>FRAMELET / LOCAL PROTOTYPE</span><span>NO API CREDITS REQUIRED</span></footer>
+  </div>
+</body>
+</html>
