@@ -6,7 +6,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 FONT_DIR = ROOT / "assets/fonts"
-TIMING_MODEL = ROOT / "runtime/models/word-timing"
+TIMING_MODELS = {"en": ROOT / "runtime/models/word-timing", "ru": ROOT / "runtime/models/word-timing-multi"}
 
 HEADER = """[Script Info]
 ScriptType: v4.00+
@@ -16,22 +16,22 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding
-Style: Story,Bangers,54,&H00FFFFFF,&H0039D7FF,&H00100C0A,&H40100C0A,0,0,0,0,100,100,0,0,1,3.3,1.1,5,22,22,0,1
+Style: Story,{font_name},54,&H00FFFFFF,&H0039D7FF,&H00100C0A,&H40100C0A,{bold},0,0,0,100,100,0,0,1,3.3,1.1,5,22,22,0,1
 
 [Events]
 Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
 """
 
 
-@lru_cache(maxsize=1)
-def timing_engine():
+@lru_cache(maxsize=2)
+def timing_engine(language):
     from mlx_audio.stt.utils import load_model
 
-    return load_model(TIMING_MODEL)
+    return load_model(TIMING_MODELS[language])
 
 
 def token(text):
-    return re.sub(r"[^a-z0-9]", "", text.casefold())
+    return re.sub(r"[\W_]", "", text.casefold().replace("ё", "е"))
 
 
 def timestamp(seconds):
@@ -78,12 +78,14 @@ def caption_groups(words, font):
         yield group
 
 
-def write_captions(directory, cues, tempo=1):
+def write_captions(directory, cues, tempo=1, language="en"):
     from PIL import ImageFont
 
-    audio = timing_engine().generate(str(directory / "narration.wav"), language="en", word_timestamps=True)
+    audio = timing_engine(language).generate(str(directory / "narration.wav"), language=language, word_timestamps=True)
     heard = [word for segment in audio.segments for word in segment.get("words", []) if token(word["word"])]
-    font = ImageFont.truetype(str(FONT_DIR / "Bangers-Regular.ttf"), 54)
+    font_path = (Path("/System/Library/Fonts/Supplemental/Arial Bold.ttf") if language == "ru"
+                 else FONT_DIR / "Bangers-Regular.ttf")
+    font = ImageFont.truetype(str(font_path), 54)
     events = []
     for start, end, line in cues:
         words = line.upper().replace("{", "").replace("}", "").replace("\\", "").split()
@@ -107,4 +109,6 @@ def write_captions(directory, cues, tempo=1):
                 events.append(f"Dialogue: 0,{timestamp(begin / tempo)},{timestamp(finish / tempo)},Story,,0,0,0,,"
                               + prefix + " ".join(colored))
             cursor += len(group)
-    (directory / "story.ass").write_text(HEADER + "\n".join(events) + "\n", encoding="utf-8")
+    header = HEADER.format(font_name="Arial" if language == "ru" else "Bangers",
+                           bold=-1 if language == "ru" else 0)
+    (directory / "story.ass").write_text(header + "\n".join(events) + "\n", encoding="utf-8")

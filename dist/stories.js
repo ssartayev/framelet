@@ -28,7 +28,7 @@ function announce(text, error = false) {
 
 function busy(state) {
   get("draft").disabled = state || !ready;
-  for (const id of ["genre", "narrator", "duration", "background", "story-idea", "export", "twist"]) {
+  for (const id of ["genre", "narrator", "language", "duration", "background", "story-idea", "export", "twist"]) {
     get(id).disabled = state;
   }
 }
@@ -95,6 +95,7 @@ get("story-form").addEventListener("submit", async (event) => {
   const job = await runJob(() => api("/api/stories", {
     idea: get("story-idea").value.trim(), category: genre.value, voice: narrator.value,
     duration: Number(get("duration").value),
+    language: get("language").value,
   }), "pitch");
   if (!job) return;
   activeId = job.id;
@@ -132,6 +133,7 @@ try {
   const options = await api("/api/stories/options");
   genre.replaceChildren(...options.categories.map((name) => new Option(name, name)));
   narrator.replaceChildren(...Object.entries(options.voices).map(([id, name]) => new Option(name, id)));
+  get("language").replaceChildren(...Object.entries(options.languages).map(([id, name]) => new Option(name, id)));
   background.replaceChildren(...Object.entries(options.backgrounds).map(([id, name]) => new Option(name, id)));
   showBackground();
   ready = options.ready;

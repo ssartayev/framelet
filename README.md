@@ -19,4 +19,4 @@ Completed films and render logs are in `runtime/renders/`. Jobs in the page rese
 
 [Reddit Stories](http://127.0.0.1:8765/stories.html) uses Qwen3.5 to plan and write fictional stories, Qwen3-TTS for expressive narration, and Whisper for word timing. It previews three openings and exports a captioned short over an original arcade background. The story models add about 5.4 GB to setup.
 
-Choose a target length of 30 seconds, 1 minute, or 2 minutes before writing a story. Actual length can vary with the narration and any new ending.
+Choose **English** or **Русский** for the script, narration and captions, then choose 30 seconds, 1 minute or 2 minutes. If you installed the project before Russian support was added, run `bash setup.sh` again to install the multilingual caption model. Actual length can vary with the narration and any new ending.

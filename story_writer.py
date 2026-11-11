@@ -23,7 +23,7 @@ must be one brief, concrete sentence. Do not write the finished narration yet.
 """
 
 STORY_PROMPT = """Write the supplied plot as an original, fictional Reddit-style confession in
-English, as if talking to one friend. Start inside the incident. Make every line change what the
+the requested language, as if talking to one friend. Start inside the incident. Make every line change what the
 listener knows or feels. Build the misunderstanding, plant the clue, then reveal its real meaning
 in the ending and show a concrete consequence of the narrator's choice. Stick to the plot.
 Use specific objects, short dialogue where natural, contractions, and changes in rhythm. Write
@@ -44,7 +44,7 @@ TWIST_PROMPT = """Continue this fictional first-person story after its final set
 Resolve the existing clue and conflict with a concrete new motive, then show what the narrator
 decides to do. The new reveal must change what happened or why, without changing anything
 already established in the setup. Do not repeat the setup or rewrite the old ending. Follow the
-suggested direction if it fits. Use short spoken English sentences matching the word target. Return only JSON:
+suggested direction if it fits. Use short spoken sentences matching the word target. Return only JSON:
 {"ending":["sentence 1","sentence 2","sentence 3"]}.
 """
 
@@ -114,22 +114,27 @@ if __name__ == "__main__":
     action = sys.argv[1]
     data = json.load(sys.stdin)
     duration = data.get("duration", 60)
-    target = {30: 68, 60: 140, 120: 280}[duration]
+    language = data.get("language", "en")
+    target = ({30: 60, 60: 125, 120: 250} if language == "ru" else {30: 68, 60: 140, 120: 280})[duration]
+    style = (" Все значения пиши на разговорном русском. Используй букву ё, числа пиши словами. "
+             "Не калькируй с английского. Используй короткие фразы, как в голосовом сообщении другу. "
+             "Каждая фраза должна добавлять новую деталь или реакцию."
+             if language == "ru" else " Write all values in natural conversational English. Spell numbers out.")
     engine = load(str(MODEL))
     model = outlines.from_mlxlm(*engine)
 
     def write(prompt, context, schema, validate, limit):
         processor = outlines.Generator(model, schema).logits_processor
-        return generate_json(prompt, json.dumps(context), validate, limit, engine=engine, processor=processor)
+        return generate_json(prompt, json.dumps(context, ensure_ascii=False), validate, limit, engine=engine, processor=processor)
 
     if action == "draft":
-        plan = write(PLAN_PROMPT, data, Plot,
+        plan = write(PLAN_PROMPT + style, data, Plot,
                      lambda value: all(5 <= len(line.strip()) <= 220 for line in value.values()), 650)
         context = {"premise": data, "plot": plan, "word target for setup and ending together": target}
         if duration == 30:
             context["delivery"] = "Use only one thought per line. Aim for 7 to 10 words per line."
         schema = {30: ShortStory, 60: Story, 120: LongStory}[duration]
-        result = write(STORY_PROMPT, context, schema, valid_story, 2400)
+        result = write(STORY_PROMPT + style, context, schema, valid_story, 2400)
         openings = {normalize(line) for line in result["hooks"]}
         setup = [line for line in result["setup"] if normalize(line) not in openings]
         if len(setup) >= 4:
@@ -149,6 +154,6 @@ if __name__ == "__main__":
         context = {"setup": data["setup"], "previous ending to avoid": " ".join(data["ending"]),
                    "direction": random.choice(TWIST_DIRECTIONS),
                    "ending word target": max(22, target - sum(len(line.split()) for line in data["setup"]))}
-        result = write(TWIST_PROMPT, context, ShortEnding if duration == 30 else Ending, valid_twist, 1100)
+        result = write(TWIST_PROMPT + style, context, ShortEnding if duration == 30 else Ending, valid_twist, 1100)
         result["ending"] = new_lines(result["ending"])
     print(json.dumps(result))

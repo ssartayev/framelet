@@ -41,6 +41,15 @@ if [[ ! -s runtime/models/word-timing/tokenizer.json ]]; then
     --local-dir runtime/models/word-timing
 fi
 
+if [[ ! -s runtime/models/word-timing-multi/weights.npz || ! -s runtime/models/word-timing-multi/config.json ]]; then
+  "$hf" download mlx-community/whisper-tiny-mlx --local-dir runtime/models/word-timing-multi
+fi
+if [[ ! -s runtime/models/word-timing-multi/tokenizer.json ]]; then
+  "$hf" download openai/whisper-tiny generation_config.json preprocessor_config.json \
+    tokenizer_config.json tokenizer.json special_tokens_map.json vocab.json merges.txt \
+    --local-dir runtime/models/word-timing-multi
+fi
+
 download_model() {
   local target=$1 digest=$2 url=$3
   if [[ -f "$target" ]] && printf '%s  %s\n' "$digest" "$target" | shasum -a 256 -c --status; then

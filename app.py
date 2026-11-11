@@ -204,7 +204,8 @@ class App(SimpleHTTPRequestHandler):
             self.send_json(HTTPStatus.OK, model_status())
         elif path == "/api/stories/options":
             self.send_json(HTTPStatus.OK, {"voices": stories.VOICES, "categories": stories.CATEGORIES,
-                                          "backgrounds": stories.CLIPS, "ready": stories.ready() and model_status()["writer"]})
+                                          "backgrounds": stories.CLIPS, "languages": stories.LANGUAGES,
+                                          "ready": stories.ready() and model_status()["writer"]})
         elif path.startswith("/api/jobs/"):
             job_id = path.removeprefix("/api/jobs/")
             with LOCK:
@@ -264,21 +265,24 @@ class App(SimpleHTTPRequestHandler):
             data = self.read_body()
             idea, category, voice = data.get("idea", ""), data["category"], data["voice"]
             duration = data.get("duration", 60)
+            language = data.get("language", "en")
+            if not isinstance(language, str) or language not in stories.LANGUAGES:
+                return self.send_json(HTTPStatus.BAD_REQUEST, {"error": "Choose a supported story language."})
             if type(duration) is not int or duration not in stories.DURATIONS:
                 raise ValueError
             if not isinstance(idea, str) or len(idea) > 500 or category not in stories.CATEGORIES or voice not in stories.VOICES:
                 raise ValueError
         except (ValueError, KeyError, TypeError):
             return self.send_json(HTTPStatus.BAD_REQUEST, {"error": "Select a genre, narrator, and length of 30, 60, or 120 seconds."})
-        if not stories.ready() or not model_status()["writer"]:
+        if not stories.ready(language) or not model_status()["writer"]:
             return self.send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "Finish local story setup first."})
         job_id = uuid.uuid4().hex
         (OUTPUT / job_id).mkdir()
         with LOCK:
-            JOBS[job_id] = {"kind": "story", "voice": voice, "duration": duration,
+            JOBS[job_id] = {"kind": "story", "voice": voice, "duration": duration, "language": language,
                             "status": "queued", "detail": "Story queued…"}
         self.submit_story("draft", job_id, {"idea": idea.strip(), "category": category,
-                                           "voice": voice, "duration": duration})
+                                           "voice": voice, "duration": duration, "language": language})
 
     def change_story(self, job_id, action):
         data = {}
@@ -295,7 +299,8 @@ class App(SimpleHTTPRequestHandler):
             if not job or job.get("kind") != "story" or "story" not in job or job["status"] not in ("pitch", "ready", "error"):
                 data = None
             else:
-                data = {**data, "story": job["story"], "voice": job["voice"], "duration": job.get("duration", 60)}
+                data = {**data, "story": job["story"], "voice": job["voice"],
+                        "duration": job.get("duration", 60), "language": job.get("language", "en")}
                 job.update(status="queued", detail="Story queued…")
         if data is None:
             return self.send_json(HTTPStatus.CONFLICT, {"error": "Write a story or wait for the current task to finish."})
