@@ -6,7 +6,7 @@ mkdir -p runtime/{bin,models,wan/bin}
 if [[ ! -x runtime/venv/bin/python ]]; then
   python3 -m venv runtime/venv
 fi
-runtime/venv/bin/python -m pip install imageio-ffmpeg mlx-lm mlx-audio==0.6.5 outlines==1.3.3 pillow
+runtime/venv/bin/python -m pip install certifi imageio-ffmpeg mlx-lm mlx-audio==0.6.5 outlines==1.3.3 pillow
 ffmpeg_path=$(runtime/venv/bin/python -c 'import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())')
 ln -sf "$ffmpeg_path" runtime/bin/ffmpeg
 runtime/venv/bin/python make_backgrounds.py

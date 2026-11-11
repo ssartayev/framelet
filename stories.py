@@ -1,6 +1,7 @@
 """Local story drafting, narration and video export."""
 import json
 import os
+import ssl
 import subprocess
 import sys
 import wave
@@ -9,6 +10,8 @@ from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
+
+import certifi
 
 from story_captions import FONT_DIR, TIMING_MODELS, write_captions
 
@@ -55,12 +58,16 @@ def cloud_narration(text, language):
         headers={"xi-api-key": os.environ["ELEVENLABS_API_KEY"].strip(), "Content-Type": "application/json"},
     )
     try:
-        with urlopen(request, timeout=90) as response:
+        with urlopen(request, timeout=90, context=ssl.create_default_context(cafile=certifi.where())) as response:
             pcm = response.read()
     except HTTPError as error:
         raise NarrationError(f"ElevenLabs returned HTTP {error.code}. Check the API key, voice ID, and credits.") from None
-    except (URLError, TimeoutError):
+    except URLError as error:
+        if isinstance(error.reason, ssl.SSLCertVerificationError):
+            raise NarrationError("Could not verify the ElevenLabs connection certificate.") from None
         raise NarrationError("Could not reach ElevenLabs. Check your connection and try again.") from None
+    except TimeoutError:
+        raise NarrationError("ElevenLabs took too long to respond. Please try again.") from None
     if not pcm or len(pcm) % 2:
         raise NarrationError("ElevenLabs returned invalid audio.")
     return pcm
