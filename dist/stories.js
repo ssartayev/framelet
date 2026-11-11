@@ -132,16 +132,20 @@ background.addEventListener("change", showBackground);
 try {
   const options = await api("/api/stories/options");
   genre.replaceChildren(...options.categories.map((name) => new Option(name, name)));
-  narrator.replaceChildren(...Object.entries(options.voices).map(([id, name]) => new Option(name, id)));
   get("language").replaceChildren(...Object.entries(options.languages).map(([id, name]) => new Option(name, id)));
   background.replaceChildren(...Object.entries(options.backgrounds).map(([id, name]) => new Option(name, id)));
   showBackground();
-  ready = options.ready;
-  busy(false);
-  if (!ready) {
-    get("story-status").textContent = "MODEL SETUP";
-    announce("Run setup.sh to install the local story models, then refresh.", true);
+  function updateVoices() {
+    const language = get("language").value;
+    const voices = options.voicesByLanguage[language];
+    narrator.replaceChildren(...Object.entries(voices).map(([id, name]) => new Option(name, id)));
+    ready = options.readyByLanguage[language];
+    get("story-status").textContent = ready ? "STORY STUDIO" : "MODEL SETUP";
+    busy(false);
+    announce(ready ? "" : "Run setup.sh to install the local story models, then refresh.", !ready);
   }
+  get("language").addEventListener("change", updateVoices);
+  updateVoices();
 } catch (error) {
   announce(error.message, true);
 }

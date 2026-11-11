@@ -203,9 +203,16 @@ class App(SimpleHTTPRequestHandler):
         if path == "/api/status":
             self.send_json(HTTPStatus.OK, model_status())
         elif path == "/api/stories/options":
-            self.send_json(HTTPStatus.OK, {"voices": stories.VOICES, "categories": stories.CATEGORIES,
-                                          "backgrounds": stories.CLIPS, "languages": stories.LANGUAGES,
-                                          "ready": stories.ready() and model_status()["writer"]})
+            ready_by_language = {
+                language: stories.ready(language) for language in stories.LANGUAGES
+            }
+            self.send_json(HTTPStatus.OK, {
+                "voices": stories.VOICES, "categories": stories.CATEGORIES,
+                "backgrounds": stories.CLIPS, "languages": stories.LANGUAGES,
+                "voicesByLanguage": {language: stories.available_voices(language)
+                                     for language in stories.LANGUAGES},
+                "readyByLanguage": ready_by_language, "ready": ready_by_language["en"],
+            })
         elif path.startswith("/api/jobs/"):
             job_id = path.removeprefix("/api/jobs/")
             with LOCK:
@@ -270,11 +277,13 @@ class App(SimpleHTTPRequestHandler):
                 return self.send_json(HTTPStatus.BAD_REQUEST, {"error": "Choose a supported story language."})
             if type(duration) is not int or duration not in stories.DURATIONS:
                 raise ValueError
-            if not isinstance(idea, str) or len(idea) > 500 or category not in stories.CATEGORIES or voice not in stories.VOICES:
+            if (not isinstance(idea, str) or len(idea) > 500
+                    or category not in stories.CATEGORIES
+                    or voice not in stories.available_voices(language)):
                 raise ValueError
         except (ValueError, KeyError, TypeError):
             return self.send_json(HTTPStatus.BAD_REQUEST, {"error": "Select a genre, narrator, and length of 30, 60, or 120 seconds."})
-        if not stories.ready(language) or not model_status()["writer"]:
+        if not stories.ready(language, voice):
             return self.send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "Finish local story setup first."})
         job_id = uuid.uuid4().hex
         (OUTPUT / job_id).mkdir()

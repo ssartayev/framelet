@@ -1,10 +1,14 @@
 """Local story drafting, narration and video export."""
 import json
+import os
 import subprocess
 import sys
 import wave
 from functools import lru_cache
 from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote
+from urllib.request import Request, urlopen
 
 from story_captions import FONT_DIR, TIMING_MODELS, write_captions
 
@@ -18,29 +22,59 @@ LANGUAGES = {"en": "English", "ru": "Русский"}
 VOICES = {"af_heart": "Vivian", "am_michael": "Aiden", "bf_emma": "Ryan"}
 CLIPS = {"neon": "Neon city", "desert": "Desert drive"}
 RATE = 24000
-DELIVERY = {
-    "hook": ("Speak directly to a friend, brisk and curious. Put one clear stress on the strange detail.", 0.20),
-    "setup": ("Conversational storytelling. Keep small details moving and voice quoted reactions naturally.", 0.08),
-    "tension": ("Build anticipation. Read the ordinary words quickly, then pause at the important clue.", 0.21),
-    "reveal": ("Take a beat. Say the surprising words slowly with the emotion they call for, then return to a natural pace.", 0.35),
-    "fallout": ("React like a friend telling a story. Let disbelief, hurt, or dry amusement follow the meaning of the words.", 0.14),
-    "ending": ("Finish a little more quietly and let the last words land. Keep the reaction true to the text.", 0.08),
-}
-RUSSIAN_DELIVERY = {
-    "hook": "Начни живо, с лёгким удивлением. Выдели голосом одну странную деталь.",
-    "setup": "Рассказывай спокойно и связно. Реплики произноси как в обычном разговоре.",
-    "tension": "Сохраняй разговорный темп. Слегка замедлись на важной детали.",
-    "reveal": "Сделай короткую паузу перед неожиданным словом. Пусть удивление слышится без театральности.",
-    "fallout": "Передай реакцию рассказчика голосом, без наигранных эмоций.",
-    "ending": "Закончи чуть тише, с естественным снижением голоса.",
+LOCAL_STYLE = {
+    "en": "Read in a calm, conversational voice, as if telling a friend what happened.",
+    "ru": "Рассказывай спокойно и естественно, как в разговоре с другом.",
 }
 
 
+def cloud_voice(language):
+    return os.environ.get(f"FRAMELET_ELEVENLABS_VOICE_{language.upper()}", "").strip()
 
-def ready(language="en"):
+
+def available_voices(language):
+    voices = {}
+    if os.environ.get("ELEVENLABS_API_KEY", "").strip() and cloud_voice(language):
+        voices["elevenlabs"] = "ElevenLabs"
+    if all((VOICE_MODEL / name).is_file() for name in (
+        "model.safetensors", "speech_tokenizer/model.safetensors",
+    )):
+        voices.update(VOICES)
+    return voices
+
+
+def cloud_narration(text, language):
+    voice_id = quote(cloud_voice(language), safe="")
+    request = Request(
+        f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}?output_format=pcm_24000",
+        data=json.dumps({
+            "text": text,
+            "model_id": "eleven_multilingual_v2",
+            "voice_settings": {"stability": 0.65, "similarity_boost": 0.75, "style": 0},
+        }).encode("utf-8"),
+        headers={"xi-api-key": os.environ["ELEVENLABS_API_KEY"].strip(), "Content-Type": "application/json"},
+    )
+    try:
+        with urlopen(request, timeout=90) as response:
+            pcm = response.read()
+    except HTTPError as error:
+        raise NarrationError(f"ElevenLabs returned HTTP {error.code}. Check the API key, voice ID, and credits.") from None
+    except (URLError, TimeoutError):
+        raise NarrationError("Could not reach ElevenLabs. Check your connection and try again.") from None
+    if not pcm or len(pcm) % 2:
+        raise NarrationError("ElevenLabs returned invalid audio.")
+    return pcm
+
+
+class NarrationError(Exception):
+    pass
+
+
+def ready(language="en", voice=None):
     timing_model = TIMING_MODELS[language]
-    return all(path.is_file() for path in (
-        VOICE_MODEL / "model.safetensors", VOICE_MODEL / "speech_tokenizer/model.safetensors",
+    voices = available_voices(language)
+    voice_ready = bool(voices) if voice is None else voice in voices
+    return voice_ready and all(path.is_file() for path in (
         MODELS / "story-writer/model.safetensors", timing_model / "weights.npz",
         timing_model / "config.json", timing_model / "tokenizer.json", timing_model / "preprocessor_config.json",
     ))
@@ -53,7 +87,15 @@ def voice_engine():
     return load_model(VOICE_MODEL)
 
 
-def narrate(directory, filename, beats, voice, language="en"):
+def narrate(directory, filename, lines, voice, language="en"):
+    if voice == "elevenlabs":
+        script = " ".join(lines)
+        pcm = cloud_narration(script, language)
+        with wave.open(str(directory / filename), "wb") as audio:
+            audio.setparams((1, 2, RATE, 0, "NONE", "not compressed"))
+            audio.writeframes(pcm)
+        return [(0, len(pcm) / (2 * RATE), script)]
+
     import numpy as np
 
     narrator = voice_engine()
@@ -61,19 +103,10 @@ def narrate(directory, filename, beats, voice, language="en"):
     sample_offset = 0
     with wave.open(str(directory / filename), "wb") as audio:
         audio.setparams((1, 2, RATE, 0, "NONE", "not compressed"))
-        for line, mood in beats:
-            instruction, pause = DELIVERY[mood]
-            if language == "ru":
-                instruction = ("Рассказывай по-русски, будто делишься историей с другом. "
-                               "Произноси только текст, с естественными ударениями. "
-                               + RUSSIAN_DELIVERY[mood])
-            else:
-                instruction += " Read only the text, like telling a friend what happened. Keep the delivery understated."
-                if mood in ("tension", "reveal"):
-                    pause += 0.16
+        for line in narration_chunks(lines):
             chunks = list(narrator.generate_custom_voice(
                 text=line, speaker=VOICES[voice], language="russian" if language == "ru" else "english",
-                instruct=instruction, max_tokens=480,
+                instruct=LOCAL_STYLE[language], max_tokens=640,
             ))
             if not chunks or any(chunk.sample_rate != RATE for chunk in chunks):
                 raise ValueError("Unexpected narration audio")
@@ -86,28 +119,21 @@ def narrate(directory, filename, beats, voice, language="en"):
             audio.writeframes(pcm.tobytes())
             cues.append((sample_offset / RATE, (sample_offset + len(pcm)) / RATE, line))
             sample_offset += len(pcm)
-            silence = round(pause * RATE)
+            silence = round(0.12 * RATE)
             audio.writeframes(bytes(silence * 2))
             sample_offset += silence
     return cues
 
 
-def story_beats(story, hook):
-    setup, ending = story["setup"], story["ending"]
-    lines = [
-        (story["hooks"][hook], "hook"),
-        *((line, "setup" if index < len(setup) // 2 else "tension") for index, line in enumerate(setup)),
-        (ending[0], "reveal"),
-        *((line, "fallout") for line in ending[1:-1]),
-        (ending[-1], "ending"),
-    ]
-    beats = []
-    for line, mood in lines:
-        if beats and beats[-1][1] == mood and len(beats[-1][0]) + 1 + len(line) <= 200:
-            beats[-1] = (beats[-1][0] + " " + line, mood)
-        else:
-            beats.append((line, mood))
-    return beats
+def narration_chunks(lines):
+    paragraph = ""
+    for line in lines:
+        if paragraph and len(paragraph) + 1 + len(line) > 280:
+            yield paragraph
+            paragraph = ""
+        paragraph = f"{paragraph} {line}" if paragraph else line
+    if paragraph:
+        yield paragraph
 
 
 def write_story(action, data, env):
@@ -127,7 +153,7 @@ def process(action, data, directory, ffmpeg, env, update):
                                          "language": language}, env)
             update(status="writing", detail="Recording your hook previews…")
             for index, hook in enumerate(story["hooks"]):
-                narrate(directory, f"hook-{index}.wav", [(hook, "hook")], data["voice"], language)
+                narrate(directory, f"hook-{index}.wav", [hook], data["voice"], language)
             update(status="pitch", detail="Choose an opening.", story=story)
         elif action == "twist":
             update(status="writing", detail="Writing a different ending…")
@@ -136,8 +162,8 @@ def process(action, data, directory, ffmpeg, env, update):
                    video=None)
         else:
             story = data["story"]
-            update(status="rendering", detail="Recording the story with expressive narration…")
-            cues = narrate(directory, "narration.wav", story_beats(story, data["hook"]), data["voice"], language)
+            update(status="rendering", detail="Recording the narration…")
+            cues = narrate(directory, "narration.wav", [story["hooks"][data["hook"]], *story["setup"], *story["ending"]], data["voice"], language)
             update(status="rendering", detail="Timing captions to the narration…")
             with wave.open(str(directory / "narration.wav")) as narration:
                 spoken_duration = narration.getnframes() / RATE
@@ -153,6 +179,8 @@ def process(action, data, directory, ffmpeg, env, update):
                 ], cwd=directory, env=env, stdout=log, stderr=subprocess.STDOUT, check=True, timeout=180)
             (directory / "story.part.mp4").replace(directory / "film.mp4")
             update(status="ready", detail="Your story is ready.", video=f"/films/{directory.name}/film.mp4")
+    except NarrationError as error:
+        update(status="error", detail=str(error))
     except Exception as error:
         details = getattr(error, "stderr", None) or str(error)
         (directory / "story-error.log").write_text(details)
