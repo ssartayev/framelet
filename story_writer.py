@@ -1,4 +1,5 @@
 import json
+import os
 import random
 import sys
 from pathlib import Path
@@ -11,35 +12,6 @@ from writer import generate_json
 from story_validation import story_is_reasonable
 
 MODEL = Path(__file__).resolve().parent / "runtime/models/story-writer"
-
-PLAN_PROMPT = """Plan an original fictional first-person short drama from the user's premise.
-Invent one concrete incident involving at most three people. Give the narrator a legitimate
-reason to draw the wrong conclusion. Plant a physical clue that fits BOTH interpretations.
-The payoff should follow from the clue. It can be funny, unsettling, or moving according to the genre.
-Find tension in two people wanting understandable but incompatible things. Avoid secret
-identities, unexplained crimes, surprise wealth, and coincidences that solve the story.
-When a premise is supplied, keep its defining people and situation.
-Write six notes in JSON: incident, stakes, wrong_belief, clue, reveal, and choice. Each note
-must be one brief, concrete sentence. Do not write the finished narration yet.
-"""
-
-STORY_PROMPT = """Write the supplied plot as an original, fictional Reddit-style confession in
-the requested language, as if talking to one friend. Start inside the incident. Make every line change what the
-listener knows or feels. Build the misunderstanding, plant the clue, then reveal its real meaning
-in the ending and show a concrete consequence of the narrator's choice. Stick to the plot.
-Use specific objects, short dialogue where natural, contractions, and changes in rhythm. Write
-plainspoken sentences a person would say out loud. Let each new detail alter the listener's guess.
-For longer stories, give the narrator a believable false explanation before the final reveal.
-For a two-minute story, include a later update with a concrete new fact that changes how the
-earlier incident reads. Connect it to the same conflict and show what happened afterward.
-Avoid 'little did I know', summaries, morals, filler, generic outrage, and melodramatic clickbait.
-Follow the supplied word target. Short stories need one turn. Longer stories need an extra
-complication and an aftermath with a concrete consequence. Keep every line short enough to narrate.
-Write three DIFFERENT one-sentence hooks, each compatible with the same setup. One begins with an
-object, one with a decision, one with something someone said. Keep each under 16 words and avoid
-spoiling the reveal. The setup must follow every hook without repeating it.
-Return only JSON: {"title":"short title","hooks":["","",""],"setup":["",""],"ending":["",""]}.
-"""
 
 TWIST_PROMPT = """Continue this fictional first-person story after its final setup sentence.
 Resolve the existing clue and conflict with a concrete new motive, then show what the narrator
@@ -55,15 +27,6 @@ TWIST_DIRECTIONS = (
     "The evidence is real but was left out on purpose by someone the narrator trusted.",
 )
 
-class Plot(BaseModel):
-    incident: str
-    stakes: str
-    wrong_belief: str
-    clue: str
-    reveal: str
-    choice: str
-
-
 StoryLine = Annotated[str, Field(max_length=120)]
 
 
@@ -74,26 +37,9 @@ class Ending(BaseModel):
 ShortLine = Annotated[str, Field(max_length=76)]
 
 
-class Story(Ending):
-    title: str
-    hooks: list[ShortLine] = Field(min_length=3, max_length=3)
-    setup: list[StoryLine] = Field(min_length=4, max_length=9)
-    ending: list[StoryLine] = Field(min_length=3, max_length=5)
-
-
 class ShortEnding(Ending):
     ending: list[ShortLine] = Field(min_length=3, max_length=3)
 
-
-class ShortStory(ShortEnding):
-    title: str
-    hooks: list[ShortLine] = Field(min_length=3, max_length=3)
-    setup: list[ShortLine] = Field(min_length=4, max_length=5)
-
-
-class LongStory(Story):
-    setup: list[StoryLine] = Field(min_length=13, max_length=24)
-    ending: list[StoryLine] = Field(min_length=6, max_length=13)
 
 def text_list(value, minimum, maximum, word_limit):
     return isinstance(value, list) and minimum <= len(value) <= maximum and all(
@@ -109,7 +55,9 @@ def normalize(line):
 def valid_story(value):
     return (
         isinstance(value, dict) and isinstance(value.get("title"), str) and bool(value["title"].strip())
-        and all(isinstance(value.get(key), list) and all(isinstance(line, str) and line.strip() for line in value[key])
+        and isinstance(value.get("hooks"), list) and len(value["hooks"]) == 3
+        and all(isinstance(value.get(key), list) and value[key]
+                and all(isinstance(line, str) and line.strip() for line in value[key])
                 for key in ("hooks", "setup", "ending"))
     )
 
@@ -124,26 +72,42 @@ if __name__ == "__main__":
              "Не калькируй с английского. Используй короткие фразы, как в голосовом сообщении другу. "
              "Каждая фраза должна добавлять новую деталь или реакцию."
              if language == "ru" else " Write all values in natural conversational English. Spell numbers out.")
-    engine = load(str(MODEL))
-    model = outlines.from_mlxlm(*engine)
+    engine = load(os.environ.get("FRAMELET_STORY_MODEL", str(MODEL)))
 
     def write(prompt, context, schema, validate, limit):
-        processor = outlines.Generator(model, schema).logits_processor
+        processor = outlines.Generator(outlines.from_mlxlm(*engine), schema).logits_processor
         return generate_json(prompt, json.dumps(context, ensure_ascii=False), validate, limit, engine=engine, processor=processor)
 
     if action == "draft":
-        plan = write(PLAN_PROMPT + style, data, Plot,
-                     lambda value: all(5 <= len(line.strip()) <= 220 for line in value.values()), 650)
-        context = {"premise": data, "plot": plan, "word target for setup and ending together": target}
-        if duration == 30:
-            context["delivery"] = "Use only one thought per line. Aim for 7 to 10 words per line."
-        schema = {30: ShortStory, 60: Story, 120: LongStory}[duration]
-        result = write(STORY_PROMPT + style, context, schema,
-                       lambda value: valid_story(value) and story_is_reasonable(value, duration), 2400)
-        openings = {normalize(line) for line in result["hooks"]}
-        setup = [line for line in result["setup"] if normalize(line) not in openings]
-        if len(setup) >= 4:
-            result["setup"] = setup
+        prompt = (
+            "Write a short fictional first-person story for spoken narration. "
+            "Use one incident, at most three people, and a concrete cause and consequence. "
+            "Keep the user's premise. Open on a surprising concrete detail. "
+            "Each sentence must move the same incident forward. End with what actually happened. "
+            "Avoid moral lessons, repetition, and twists unrelated to the opening. "
+            "Return only JSON with title, hooks (three distinct possible opening sentences), "
+            "setup (the incident in chronological order), and ending (the payoff). "
+            f"Aim for {target} words in one hook plus setup and ending. "
+            "Each array item is one short sentence. The setup must work after any hook."
+        )
+        if language == "ru":
+            prompt = (
+                "Напиши бытовую историю от первого лица по идее пользователя. "
+                "Выбери одного рассказчика и сохраняй его пол и точку зрения. "
+                "У каждого персонажа одна ясная роль. Все события должны относиться к одному конфликту. "
+                "Покажи, что рассказчик заметил, что сделал и что узнал. "
+                "Развязка прямо отвечает на вопрос, который возник в начале. "
+                f"Около {target} слов: одно вступление, затем завязка и развязка. "
+                "Верни только JSON с ключами title, hooks, setup, ending. "
+                "Title — название, остальные поля — массивы коротких фраз. "
+                "В hooks дай три формулировки одного вступления, в setup — события, в ending — развязку."
+            )
+        result = generate_json(
+            prompt + style, json.dumps(data, ensure_ascii=False),
+            lambda value: valid_story(value) and story_is_reasonable(value, duration),
+            max_tokens={30: 650, 60: 1000, 120: 1700}[duration],
+            engine=engine, repetition_penalty=1.08,
+        )
     else:
         old_lines = {normalize(line) for line in data["setup"] + data["ending"]}
 
@@ -154,6 +118,7 @@ if __name__ == "__main__":
             return (
                 isinstance(value, dict) and text_list(value.get("ending"), 3, 13, 32)
                 and len(new_lines(value["ending"])) >= 3
+                and story_is_reasonable({**data, "ending": new_lines(value["ending"])}, duration)
             )
 
         context = {"setup": data["setup"], "previous ending to avoid": " ".join(data["ending"]),

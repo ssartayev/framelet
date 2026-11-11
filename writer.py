@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 from mlx_lm import generate, load
-from mlx_lm.sample_utils import make_sampler
+from mlx_lm.sample_utils import make_logits_processors, make_sampler
 
 MODEL = Path(__file__).resolve().parent / "runtime/models/writer"
 SYSTEM = """You are a writer for short vertical animated films. Return only valid JSON:
@@ -22,7 +22,7 @@ def make_plan(idea):
     return generate_json(SYSTEM, idea, valid_plan, max_tokens=650)
 
 
-def generate_json(system, idea, validate, max_tokens, engine=None, processor=None):
+def generate_json(system, idea, validate, max_tokens, engine=None, processor=None, repetition_penalty=None):
     model, tokenizer = engine or load(str(MODEL))
     messages = [{"role": "system", "content": system}, {"role": "user", "content": idea}]
     prompt = tokenizer.apply_chat_template(
@@ -31,8 +31,11 @@ def generate_json(system, idea, validate, max_tokens, engine=None, processor=Non
     for temperature in (0.6, 0.3):
         if processor is not None:
             processor.reset()
+        processors = make_logits_processors(repetition_penalty=repetition_penalty, repetition_context_size=96)
+        if processor is not None:
+            processors.append(processor)
         reply = generate(model, tokenizer, prompt=prompt, max_tokens=max_tokens,
-                         logits_processors=[processor] if processor is not None else None,
+                         logits_processors=processors,
                          sampler=make_sampler(temp=temperature, top_p=0.9), verbose=False)
         for match in re.finditer(r"\{", reply):
             try:
