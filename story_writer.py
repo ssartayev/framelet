@@ -2,6 +2,7 @@ import json
 import random
 import sys
 from pathlib import Path
+from typing import Annotated
 
 import outlines
 from mlx_lm import load
@@ -73,9 +74,17 @@ class Story(Ending):
     ending: list[str] = Field(min_length=4, max_length=8)
 
 
-class ShortStory(Story):
-    setup: list[str] = Field(min_length=4, max_length=6)
-    ending: list[str] = Field(min_length=3, max_length=4)
+ShortLine = Annotated[str, Field(max_length=76)]
+
+
+class ShortEnding(Ending):
+    ending: list[ShortLine] = Field(min_length=3, max_length=3)
+
+
+class ShortStory(ShortEnding):
+    title: str
+    hooks: list[ShortLine] = Field(min_length=3, max_length=3)
+    setup: list[ShortLine] = Field(min_length=4, max_length=5)
 
 
 class LongStory(Story):
@@ -117,6 +126,8 @@ if __name__ == "__main__":
         plan = write(PLAN_PROMPT, data, Plot,
                      lambda value: all(5 <= len(line.strip()) <= 220 for line in value.values()), 650)
         context = {"premise": data, "plot": plan, "word target for setup and ending together": target}
+        if duration == 30:
+            context["delivery"] = "Use only one thought per line. Aim for 7 to 10 words per line."
         schema = {30: ShortStory, 60: Story, 120: LongStory}[duration]
         result = write(STORY_PROMPT, context, schema, valid_story, 2400)
         openings = {normalize(line) for line in result["hooks"]}
@@ -138,6 +149,6 @@ if __name__ == "__main__":
         context = {"setup": data["setup"], "previous ending to avoid": " ".join(data["ending"]),
                    "direction": random.choice(TWIST_DIRECTIONS),
                    "ending word target": max(22, target - sum(len(line.split()) for line in data["setup"]))}
-        result = write(TWIST_PROMPT, context, Ending, valid_twist, 1100)
+        result = write(TWIST_PROMPT, context, ShortEnding if duration == 30 else Ending, valid_twist, 1100)
         result["ending"] = new_lines(result["ending"])
     print(json.dumps(result))
