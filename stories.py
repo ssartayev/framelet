@@ -82,8 +82,9 @@ def ready(language="en", voice=None):
     timing_model = TIMING_MODELS[language]
     voices = available_voices(language)
     voice_ready = bool(voices) if voice is None else voice in voices
-    return voice_ready and all(path.is_file() for path in (
-        MODELS / "story-writer/model.safetensors", timing_model / "weights.npz",
+    writer_ready = bool(os.environ.get("GROQ_API_KEY", "").strip()) or (MODELS / "story-writer/model.safetensors").is_file()
+    return voice_ready and writer_ready and all(path.is_file() for path in (
+        timing_model / "weights.npz",
         timing_model / "config.json", timing_model / "tokenizer.json", timing_model / "preprocessor_config.json",
     ))
 
@@ -151,6 +152,11 @@ def write_story(action, data, env):
             capture_output=True, text=True, check=True, timeout=180, cwd=ROOT, env=env,
         )
     except subprocess.CalledProcessError as error:
+        if env.get("GROQ_API_KEY", "").strip():
+            detail = error.stderr.strip()
+            if detail.startswith(("Groq ", "Framelet could not reach Groq")) and "\n" not in detail:
+                raise NarrationError(detail) from error
+            raise NarrationError("The Groq story writer failed. Try again.") from error
         raise NarrationError("The local writer could not create a concise story. Try another idea.") from error
     return json.loads(result.stdout.splitlines()[-1])
 

@@ -26,3 +26,9 @@ For cloud narration, set `ELEVENLABS_API_KEY` in the server environment and set
 voice IDs you want to use for each language. Choose a voice recorded in that language.
 Restart Framelet and select **ElevenLabs** under Narrator. The service receives the story text
 and generates each opening preview and the final narration. Drafting and captions still run locally.
+
+Set `GROQ_API_KEY` in the server environment before launching Framelet to use Groq
+for Reddit Stories drafts and alternate endings. The default model is
+`openai/gpt-oss-120b`. Set `FRAMELET_GROQ_MODEL` to compare another Groq model.
+Without the key, stories use the local writer. Subtitle alignment still uses
+local models.
