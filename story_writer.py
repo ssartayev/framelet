@@ -8,7 +8,7 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 import certifi
-from story_validation import story_is_reasonable
+from story_validation import story_is_reasonable, story_language_matches
 
 PLOT_RULES = Path(__file__).with_name("STORY_RULES.md")
 
@@ -70,7 +70,7 @@ def write_with_api(provider, prompt, context, validate, key):
                 parts = payload["candidates"][0]["content"]["parts"]
                 content = "".join(part.get("text", "") for part in parts if not part.get("thought"))
             result = json.loads(content)
-        except (KeyError, IndexError, TypeError, ValueError):
+        except (KeyError, IndexError, TypeError, ValueError, AttributeError):
             result = None
         if validate(result):
             return result
@@ -166,7 +166,7 @@ if __name__ == "__main__":
             )
         result = write(
             prompt, data,
-            lambda value: valid_story(value) and story_is_reasonable(value, duration),
+            lambda value: valid_story(value) and story_is_reasonable(value, duration) and story_language_matches(value, language),
         )
     elif action == "rewrite":
         original = data["story"]
@@ -197,7 +197,7 @@ if __name__ == "__main__":
                 return False
             candidate = revised_story(value)
             return (candidate != original and valid_story(candidate)
-                    and story_is_reasonable(candidate, duration))
+                    and story_is_reasonable(candidate, duration) and story_language_matches(candidate, language))
 
         result = revised_story(write(prompt, data, valid_revision))
     else:

@@ -12,7 +12,8 @@ import wave
 from pathlib import Path
 from unittest.mock import patch
 from urllib.error import HTTPError
-from urllib.request import Request, urlopen
+from urllib.request import Request, urlopen, build_opener, HTTPCookieProcessor
+from http.cookiejar import CookieJar
 
 import app
 import stories
@@ -20,7 +21,7 @@ import stories
 STORY = {
     "title": "Ключи от мастерской",
     "hooks": ["Отец положил ключи на верстак.", "Я узнал связку отцовских ключей.", "Ключи звякнули о мой верстак."],
-    "setup": ["Брат остался без работы, и отец обещал ему место в моей мастерской."],
+    "setup": ["Брат остался без работы, и отец обещал ему место в моей мастерской.", "Отец даже не спросил меня, нужна ли помощь.", "Я отложил инструменты и попросил брата поговорить без отца."],
     "ending": ["Я предложил брату начать учеником.", "Брат попросил выдать ему перчатки."],
 }
 ENDING = ["Брат признался, что хочет уйти из семьи.", "Я помог ему снять комнату рядом."]
@@ -165,6 +166,7 @@ class EditorHTTPTests(unittest.TestCase):
         self.addCleanup(self.thread.join)
         self.addCleanup(self.server.shutdown)
         self.base = f"http://127.0.0.1:{self.server.server_port}"
+        self.opener = build_opener(HTTPCookieProcessor(CookieJar()))
 
     @staticmethod
     def fake_audio(directory, filename, lines, voice, language):
@@ -172,7 +174,7 @@ class EditorHTTPTests(unittest.TestCase):
 
     def request(self, path, data=None):
         body = None if data is None else json.dumps(data).encode()
-        with urlopen(Request(self.base + path, data=body), timeout=3) as response:
+        with self.opener.open(Request(self.base + path, data=body), timeout=3) as response:
             return json.load(response)
 
     def wait_for(self, job_id, state):
@@ -203,7 +205,7 @@ class EditorHTTPTests(unittest.TestCase):
         self.request(f"/api/stories/{job_id}/preview", {"hook": 1})
         preview = self.wait_for(job_id, "pitch")["preview"]
         self.assertEqual(self.narrator.call_args.args[2], [OPENINGS[1]])
-        with urlopen(self.base + preview, timeout=3) as response:
+        with self.opener.open(self.base + preview, timeout=3) as response:
             self.assertEqual(response.headers.get_content_type(), "audio/wav")
             self.assertEqual(response.read(), b"preview")
 
@@ -261,7 +263,7 @@ class EditorHTTPTests(unittest.TestCase):
         request = Request(self.base + "/api/stories", data=json.dumps({
             "idea": "Test", "category": "Family secrets", "voice": "elevenlabs", "duration": 30,
         }).encode(), headers={"Origin": self.base.replace("http:", "https:")})
-        with urlopen(request, timeout=3) as response:
+        with self.opener.open(request, timeout=3) as response:
             self.assertEqual(response.status, 202)
             self.wait_for(json.load(response)["id"], "pitch")
 
@@ -269,6 +271,94 @@ class EditorHTTPTests(unittest.TestCase):
         source = "П" * 4000
         self.draft(source)
         self.assertEqual(self.writer.call_args.args[1]["idea"], source)
+
+    def test_other_browser_cannot_read_edit_or_download_project(self):
+        job_id = self.draft()
+        for path, payload in ((f"/api/jobs/{job_id}", None),
+                              (f"/films/{job_id}/film.mp4", None),
+                              (f"/api/stories/{job_id}/twist", {})):
+            request = Request(self.base + path, data=None if payload is None else json.dumps(payload).encode())
+            with self.subTest(path=path), self.assertRaises(HTTPError) as error:
+                urlopen(request, timeout=3)
+            self.assertEqual(error.exception.code, 404)
+
+    def test_idempotent_create_survives_restart_and_rejects_body_change(self):
+        self.request("/api/stories/options")
+        data = {"idea": "Keys", "category": "Family secrets", "voice": "elevenlabs", "language": "ru", "duration": 30}
+        def submit(body):
+            request = Request(self.base + "/api/stories", data=json.dumps(body).encode(),
+                              headers={"Idempotency-Key": "same-request-123"})
+            with self.opener.open(request, timeout=3) as response:
+                return json.load(response)
+        first = submit(data)
+        self.wait_for(first["id"], "pitch")
+        with app.LOCK:
+            app.JOBS.clear()
+            app.JOBS.update(app.store().load())
+        self.assertEqual(submit(data), first)
+        self.writer.assert_called_once()
+        with self.assertRaises(HTTPError) as error:
+            submit({**data, "idea": "different"})
+        self.assertEqual(error.exception.code, 409)
+        self.assertEqual(self.request("/api/projects")["projects"][0]["id"], first["id"])
+
+    def test_queue_rejects_overload_before_spending(self):
+        with patch.object(app, "MAX_PENDING", 0), self.assertRaises(HTTPError) as error:
+            self.draft()
+        self.assertEqual(error.exception.code, 429)
+        self.writer.assert_not_called()
+
+    def test_sentence_edit_preserves_other_sections_and_version(self):
+        job_id = self.draft()
+        self.request(f"/api/stories/{job_id}/edit", {"section": "ending", "index": 0,
+                                                    "text": "Я предложил брату сначала поработать рядом со мной."})
+        job = self.wait_for(job_id, "pitch")
+        self.assertEqual(job["story"]["setup"], STORY["setup"])
+        self.assertEqual(job["story"]["hooks"], STORY["hooks"])
+        self.assertEqual(job["story"]["ending"][1], STORY["ending"][1])
+        self.assertEqual(job["versions"][-1]["story"], STORY)
+        self.writer.assert_called_once()
+        self.narrator.assert_not_called()
+
+    def test_beta_access_token_protects_options_and_post(self):
+        import base64
+        with patch.dict(os.environ, FRAMELET_ACCESS_TOKEN="fixture-password"):
+            with self.assertRaises(HTTPError) as error:
+                self.request("/api/stories/options")
+            self.assertEqual(error.exception.code, 401)
+            request = Request(self.base + "/api/stories/options", headers={"Authorization": "Basic " +
+                              base64.b64encode(b"beta:fixture-password").decode()})
+            with self.opener.open(request, timeout=3) as response:
+                self.assertEqual(response.status, 200)
+
+    def test_database_failure_does_not_leave_queued_jobs(self):
+        import sqlite3
+        from job_store import JobStore
+        with patch.object(JobStore, "save", side_effect=sqlite3.OperationalError("disk full")):
+            with self.assertRaises(HTTPError) as error:
+                self.draft()
+            self.assertEqual(error.exception.code, 503)
+        self.assertEqual(app.JOBS, {})
+        self.writer.assert_not_called()
+
+    def test_database_failure_restores_existing_project(self):
+        import sqlite3
+        from job_store import JobStore
+        job_id = self.draft()
+        before = self.request(f"/api/jobs/{job_id}")
+        with patch.object(JobStore, "save", side_effect=sqlite3.OperationalError("disk full")):
+            with self.assertRaises(HTTPError) as error:
+                self.request(f"/api/stories/{job_id}/twist", {})
+            self.assertEqual(error.exception.code, 503)
+        self.assertEqual(self.request(f"/api/jobs/{job_id}"), before)
+        self.writer.assert_called_once()
+
+    def test_bad_basic_credentials_are_denied(self):
+        with patch.dict(os.environ, FRAMELET_ACCESS_TOKEN="fixture-password"):
+            for auth in ("Basic !!!", "Basic Zm9v", "Bearer anything"):
+                with self.subTest(auth=auth), self.assertRaises(HTTPError) as error:
+                    self.opener.open(Request(self.base + "/api/stories/options", headers={"Authorization": auth}), timeout=3)
+                self.assertEqual(error.exception.code, 401)
 
 
 if __name__ == "__main__":

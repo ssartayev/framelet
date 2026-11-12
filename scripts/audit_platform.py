@@ -66,7 +66,11 @@ def audit(render=False):
                "Structural validation only; does not certify story quality.")
 
     if render:
-        for seconds in (10, 44):
+        render_story = {**short,
+                        "setup": ["My brother arrived at my workshop with our father, who had promised him a job without asking me.",
+                                  "I told my brother he would have to start as an apprentice and earn the same wage as everyone else."],
+                        "ending": ["He asked where I kept the work gloves. Our father left, but my brother stayed to finish an order."]}
+        for seconds in (10, 30, 44):
             with tempfile.TemporaryDirectory(prefix="framelet-audit-") as folder:
                 directory = Path(folder)
 
@@ -81,14 +85,15 @@ def audit(render=False):
                     ]
 
                 state = {}
-                with patch("stories.narrate", side_effect=synthetic_audio):
-                    stories.process("render", dict(story=short, hook=0, duration=30,
+                with patch("stories.narrate", side_effect=synthetic_audio), patch("stories.write_story", return_value=render_story):
+                    stories.process("render", dict(story=render_story, hook=0, duration=30,
                                     language="en", voice="elevenlabs", background="neon"),
                                     directory, str(app.FFMPEG), os.environ.copy(),
                                     lambda **fields: state.update(fields))
                 film = directory / "film.mp4"
                 if state.get("status") != "ready":
-                    record(f"Render {seconds}s fixture", False, state)
+                    record(f"Reject out-of-range {seconds}s narration without publishing",
+                           seconds != 30 and not film.exists() and "duration" in state.get("detail", ""), state)
                     continue
                 decoded = subprocess.run([str(app.FFMPEG), "-hide_banner", "-i", str(film),
                                           "-f", "null", "-"], capture_output=True, text=True, timeout=90)

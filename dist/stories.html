@@ -29,10 +29,11 @@
           <section class="card">
             <div class="step">01 / YOUR STORY</div>
             <h2>Set the scene</h2>
+            <label>Saved projects<select id="projects"><option value="">New story</option></select></label>
             <form id="story-form">
               <div class="story-options">
                 <label>Genre<select id="genre" required></select></label>
-                <label>Narrator for new story<select id="narrator" required></select></label>
+                <label>Narrator<select id="narrator" required></select></label>
               </div>
               <label class="story-idea">Story language<select id="language" required></select></label>
               <label class="story-idea">Target length
@@ -67,6 +68,13 @@
             </div>
             <audio id="hook-preview" controls preload="none" aria-label="Selected opening preview" hidden></audio>
             <details id="story-details" open><summary>Read the story</summary><p id="setup"></p><p id="ending"></p></details>
+            <details><summary>Fix one sentence</summary>
+              <form id="sentence-form">
+                <label>Sentence<select id="sentence-select"></select></label>
+                <textarea id="sentence-text" maxlength="175" required aria-label="Sentence text"></textarea>
+                <button id="save-sentence" type="submit" class="secondary">Save this sentence</button>
+              </form>
+            </details>
             <form id="rewrite-form">
               <label class="story-idea">What should change?
                 <select id="edit-scope">
@@ -90,6 +98,7 @@
         <section class="preview card">
           <div class="preview-head"><div><div class="step">03 / THE SHORT</div><h2>Screening room</h2></div><span class="ratio">9:16</span></div>
           <label class="background-label">Background<select id="background"></select></label>
+          <label class="background-label">Captions<select id="caption-style"><option value="bold">Bold · animated</option><option value="calm">Calm · sentence case</option></select></label>
           <div class="screen">
             <video id="background-preview" autoplay muted loop playsinline aria-label="Background preview"></video>
             <video id="story-film" controls playsinline preload="metadata" aria-label="Generated story short" hidden></video>

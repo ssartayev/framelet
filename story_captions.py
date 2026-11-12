@@ -30,9 +30,11 @@ def alignment_words(alignment, duration):
         raise ValueError("Missing character timing")
     words = []
     pending = []
+    previous = -1
     for char, start in zip(characters, starts):
-        if not isinstance(char, str) or len(char) != 1 or not math.isfinite(start) or not 0 <= start <= duration + 0.1:
+        if not isinstance(char, str) or len(char) != 1 or not math.isfinite(start) or not previous <= start <= duration + 0.1 or start < 0:
             raise ValueError("Invalid character timing")
+        previous = start
         if char.isspace():
             if pending:
                 words.append({"word": "".join(pending), "start": word_start})
@@ -45,7 +47,10 @@ def alignment_words(alignment, duration):
         words.append({"word": "".join(pending), "start": word_start})
     if not words or any(first["start"] > second["start"] for first, second in zip(words, words[1:])):
         raise ValueError("Invalid word timing")
-    return [word for word in words if token(word["word"])]
+    words = [word for word in words if token(word["word"])]
+    if not words:
+        raise ValueError("Missing spoken words")
+    return words
 
 
 def token(text):
@@ -96,7 +101,7 @@ def caption_groups(words, font):
         yield group
 
 
-def write_captions(directory, cues, heard, tempo=1, language="en"):
+def write_captions(directory, cues, heard, tempo=1, language="en", style="bold"):
     from PIL import ImageFont
 
     font_path = FONT_DIR / "Bangers-Regular.ttf"
@@ -110,7 +115,8 @@ def write_captions(directory, cues, heard, tempo=1, language="en"):
     font = ImageFont.truetype(str(font_path), 54)
     events = []
     for start, end, line in cues:
-        words = line.upper().replace("{", "").replace("}", "").replace("\\", "").split()
+        line = line.upper() if style == "bold" else line
+        words = line.replace("{", "").replace("}", "").replace("\\", "").split()
         if not words:
             continue
         boundaries = word_timings(words, start, end, heard)
@@ -122,7 +128,7 @@ def write_captions(directory, cues, heard, tempo=1, language="en"):
                 if finish - begin < 0.015:
                     continue
                 prefix = rf"{{\an5\pos(180,363)\fs{size}}}"
-                if index == 0:
+                if index == 0 and style == "bold":
                     prefix = rf"{{\an5\pos(180,363)\fs{size}\fscx94\fscy94\t(0,95,\fscx100\fscy100)}}"
                 colored = [
                     rf"{{\c&H39D7FF&}}{word}{{\c&HFFFFFF&}}" if j == index else word

@@ -15,7 +15,7 @@ def story_is_reasonable(story, duration):
             if any(not line for line in lines) or len({tuple(line) for line in lines}) != len(lines):
                 return False
             words = [word for line in lines for word in line]
-            if len(words) > maximum:
+            if not {30: 30, 60: 70, 120: 150}[duration] <= len(words) <= maximum:
                 return False
             phrases = [tuple(words[i:i + 7]) for i in range(len(words) - 6)]
             if len(phrases) != len(set(phrases)):
@@ -23,3 +23,13 @@ def story_is_reasonable(story, duration):
         return True
     except (KeyError, IndexError, TypeError):
         return False
+
+
+def story_language_matches(story, language):
+    """Catch gross wrong-language output; proper names may retain another alphabet."""
+    text = " ".join([*story.get("hooks", []), *story.get("setup", []), *story.get("ending", [])])
+    letters = [char for char in text if char.isalpha()]
+    if not letters:
+        return False
+    cyrillic = sum("а" <= char.lower() <= "я" or char.lower() == "ё" for char in letters) / len(letters)
+    return cyrillic >= .6 if language == "ru" else cyrillic <= .1

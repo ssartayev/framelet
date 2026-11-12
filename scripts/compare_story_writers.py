@@ -1,5 +1,6 @@
 """Compare the configured story models on identical English and Russian tasks."""
 import argparse
+import hashlib
 import json
 import os
 import subprocess
@@ -44,11 +45,15 @@ def run_provider(provider, cases):
     for action, language, data in cases:
         started = time.monotonic()
         command = [sys.executable, "story_writer.py", action]
-        result = {"action": action, "language": language}
+        duration = data.get("duration", 60 if action == "draft" else 30)
+        result = {"action": action, "language": language, "duration": duration,
+                  "model": os.environ.get(f"FRAMELET_{provider.upper()}_MODEL", "openai/gpt-oss-120b" if provider == "groq" else "gemini-3.8-flash"),
+                  "rules_sha256": hashlib.sha256((ROOT / "STORY_RULES.md").read_bytes()).hexdigest(),
+                  "revision": subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True).stdout.strip()}
         try:
             process = subprocess.run(
                 command, cwd=ROOT, text=True, capture_output=True, timeout=100,
-                input=json.dumps({**data, "language": language, "duration": 60}, ensure_ascii=False),
+                input=json.dumps({**data, "language": language, "duration": duration}, ensure_ascii=False),
                 env={**os.environ, f"FRAMELET_STORY_{action.upper()}_PROVIDER": provider},
             )
             if process.returncode == 0:
@@ -71,7 +76,9 @@ if __name__ == "__main__":
                         help="Repeat each case to measure consistency.")
     options = parser.parse_args()
     providers = (options.provider,) if options.provider else ("groq", "gemini")
-    cases = (CASES[:1] if options.quick else CASES) * options.repeats
+    expanded = [(action, language, {**data, "duration": duration})
+                for action, language, data in CASES[:2] for duration in (30, 60, 120)] + CASES[2:]
+    cases = (CASES[:1] if options.quick else expanded) * options.repeats
     keys = [f"{provider.upper()}_API_KEY" for provider in providers]
     missing = [name for name in keys if not os.environ.get(name, "").strip()]
     if missing:

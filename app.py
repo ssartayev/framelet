@@ -1,4 +1,13 @@
 import argparse
+import base64
+import copy
+import sqlite3
+import hashlib
+import hmac
+import secrets
+import time
+from http.cookies import SimpleCookie
+from job_store import JobStore
 import json
 import os
 import random
@@ -34,7 +43,12 @@ WIDTH, HEIGHT = 192, 336
 EXPORT_WIDTH, EXPORT_HEIGHT = 360, 640
 JOBS = {}
 LOCK = threading.Lock()
-WORKER = ThreadPoolExecutor(max_workers=1)
+WORKER = ThreadPoolExecutor(max_workers=2)
+RENDER_WORKER = ThreadPoolExecutor(max_workers=1)
+POST_LOCK = threading.Lock()
+ACTIVE = ("queued", "writing", "rendering")
+MAX_PENDING = 8
+MAX_OWNER_PENDING = 2
 ENV = {**os.environ, "PATH": f"{BIN}:{os.environ['PATH']}", "HF_HUB_OFFLINE": "1"}
 SURPRISES = (
     "a quiet robot in an abandoned city", "a strange discovery under the ocean",
@@ -44,6 +58,10 @@ SURPRISES = (
 VIDEO_WEIGHTS = ("wan.gguf", "t5.gguf", "tae.safetensors")
 
 
+class SubmissionError(Exception):
+    pass
+
+
 def model_status():
     return {
         "writer": (MODELS / "writer/model.safetensors").is_file(),
@@ -51,9 +69,17 @@ def model_status():
     }
 
 
+def store():
+    return JobStore(OUTPUT / "jobs.sqlite3")
+
+
 def update(job_id, **fields):
     with LOCK:
-        JOBS[job_id].update(fields)
+        job = JOBS[job_id]
+        if "story" in fields and job.get("story") and fields["story"] != job["story"]:
+            job["versions"] = [*job.get("versions", []), {"story": job["story"], "at": time.time()}][-20:]
+        JOBS[job_id].update(fields, updated_at=time.time())
+        store().save(job_id, JOBS[job_id])
 
 
 def run(args, directory, log):
@@ -138,6 +164,68 @@ class App(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(ROOT / "dist"), **kwargs)
 
+    def authorize(self):
+        if os.environ.get("FRAMELET_HTTPS_PROXY") == "1" and self.headers.get("X-Forwarded-Proto") != "https":
+            self.send_error(403, "HTTPS ingress required")
+            return False
+        token = os.environ.get("FRAMELET_ACCESS_TOKEN", "")
+        if token:
+            try:
+                scheme, encoded = self.headers.get("Authorization", "").split(" ", 1)
+                supplied = base64.b64decode(encoded, validate=True).decode().split(":", 1)[1]
+                allowed = scheme.lower() == "basic" and hmac.compare_digest(supplied.encode(), token.encode())
+            except (ValueError, IndexError, UnicodeError):
+                allowed = False
+            if not allowed:
+                self.send_response(401)
+                self.send_header("WWW-Authenticate", 'Basic realm="Framelet beta", charset="UTF-8"')
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return False
+        cookie = SimpleCookie()
+        try:
+            cookie.load(self.headers.get("Cookie", ""))
+        except Exception:
+            pass
+        value = cookie.get("framelet_session")
+        value = value.value if value else ""
+        if not re.fullmatch(r"[a-f0-9]{64}", value):
+            value = secrets.token_hex(32)
+            self.new_session = value
+        self.owner = hashlib.sha256(value.encode()).hexdigest()
+        return True
+
+    def end_headers(self):
+        if getattr(self, "new_session", None):
+            secure = "; Secure" if (os.environ.get("FRAMELET_SECURE_COOKIES") == "1" or os.environ.get("FRAMELET_HTTPS_PROXY") == "1") else ""
+            self.send_header("Set-Cookie", f"framelet_session={self.new_session}; Path=/; HttpOnly; SameSite=Strict; Max-Age=2592000{secure}")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        super().end_headers()
+
+    def owns_unlocked(self, job_id):
+        return JOBS.get(job_id, {}).get("owner") == self.owner
+
+    def owns(self, job_id):
+        with LOCK:
+            return JOBS.get(job_id, {}).get("owner") == self.owner
+
+    def save_submission(self, job_id):
+        with LOCK:
+            JOBS[job_id]["updated_at"] = time.time()
+            try:
+                store().save(job_id, JOBS[job_id], getattr(self, "idempotency", None))
+            except (OSError, sqlite3.Error) as error:
+                original = getattr(self, "original_job", None)
+                if original is None:
+                    JOBS.pop(job_id, None)
+                    try:
+                        (OUTPUT / job_id).rmdir()
+                    except OSError:
+                        pass
+                else:
+                    JOBS[job_id] = original
+                raise SubmissionError("Could not save this action. No generation was started; try again later.") from error
+
     def send_json(self, status, body):
         data = json.dumps(body).encode()
         self.send_response(status)
@@ -187,19 +275,29 @@ class App(SimpleHTTPRequestHandler):
     def serve_render_asset(self, path, head_only=False):
         film = re.fullmatch(r"/films/([a-f0-9]{32})/film\.mp4", path)
         if film:
+            if not self.owns(film[1]):
+                self.send_error(404)
+                return True
             self.serve_media(OUTPUT / film[1] / "film.mp4", "video/mp4", head_only)
             return True
         hook = re.fullmatch(r"/hooks/([a-f0-9]{32})/(hook-[0-2]\.wav)", path)
         if hook:
+            if not self.owns(hook[1]):
+                self.send_error(404)
+                return True
             self.serve_media(OUTPUT / hook[1] / hook[2], "audio/wav", head_only)
             return True
         return False
 
     def do_HEAD(self):
+        if not self.authorize():
+            return
         if not self.serve_render_asset(urlsplit(self.path).path, head_only=True):
             super().do_HEAD()
 
     def do_GET(self):
+        if not self.authorize():
+            return
         path = urlsplit(self.path).path
         if self.serve_render_asset(path):
             return
@@ -226,16 +324,53 @@ class App(SimpleHTTPRequestHandler):
                     for entry in stories.PREMISES.values()
                 ],
             })
+        elif path == "/api/projects":
+            with LOCK:
+                projects = [{"id": key, "title": job.get("story", {}).get("title", "Untitled"),
+                             "status": job["status"], "updated_at": job.get("updated_at", 0)}
+                            for key, job in JOBS.items() if job.get("owner") == self.owner]
+            self.send_json(HTTPStatus.OK, {"projects": sorted(projects, key=lambda j: j["updated_at"], reverse=True)[:50]})
         elif path.startswith("/api/jobs/"):
             job_id = path.removeprefix("/api/jobs/")
             with LOCK:
-                job = JOBS.get(job_id, {}).copy()
+                job = JOBS.get(job_id, {}).copy() if self.owns_unlocked(job_id) else {}
             self.send_json(HTTPStatus.OK if job else HTTPStatus.NOT_FOUND,
-                           job or {"error": "Job not found."})
+                           {key: value for key, value in job.items() if key != "owner"} if job else {"error": "Job not found."})
         else:
             super().do_GET()
 
     def do_POST(self):
+        if not self.authorize():
+            return
+        host = self.headers.get("Host")
+        if self.headers.get("Origin") not in (None, f"http://{host}", f"https://{host}"):
+            return self.send_json(403, {"error": "Use the Framelet studio page."})
+        try:
+            self.payload = self.read_body(limit=25_000)
+        except (ValueError, TypeError):
+            return self.send_json(400, {"error": "Send a JSON object of at most 25 KB."})
+        key = self.headers.get("Idempotency-Key")
+        if key and not re.fullmatch(r"[A-Za-z0-9_-]{8,128}", key):
+            return self.send_json(400, {"error": "Invalid request identifier."})
+        digest = hashlib.sha256((self.path + json.dumps(self.payload, sort_keys=True)).encode()).hexdigest()
+        with POST_LOCK:
+            if key:
+                previous = store().response(self.owner, key)
+                if previous:
+                    if previous[0] != digest:
+                        return self.send_json(409, {"error": "Request identifier was already used for a different action."})
+                    return self.send_json(202, previous[1])
+                self.idempotency = (self.owner, key, digest)
+            with LOCK:
+                pending = [job for job in JOBS.values() if job.get("status") in ACTIVE]
+            if len(pending) >= MAX_PENDING or sum(job.get("owner") == self.owner for job in pending) >= MAX_OWNER_PENDING:
+                return self.send_json(429, {"error": "Your studio is busy. Wait for a current job to finish."})
+            try:
+                self.dispatch_post()
+            except SubmissionError as error:
+                self.send_json(503, {"error": str(error)})
+
+    def dispatch_post(self):
         path = urlsplit(self.path).path
         host = self.headers.get("Host")
         if self.headers.get("Origin") not in (None, f"http://{host}", f"https://{host}"):
@@ -244,12 +379,14 @@ class App(SimpleHTTPRequestHandler):
             return self.create_pitch()
         if path == "/api/stories":
             return self.create_story()
-        story_action = re.fullmatch(r"/api/stories/([a-f0-9]{32})/(twist|rewrite|preview|render)", path)
+        story_action = re.fullmatch(r"/api/stories/([a-f0-9]{32})/(twist|rewrite|preview|render|edit)", path)
         if story_action:
             return self.change_story(*story_action.groups())
         match = re.fullmatch(r"/api/jobs/([a-f0-9]{32})/render", path)
         if not match or self.stories_only:
             return self.send_json(HTTPStatus.NOT_FOUND, {"error": "Endpoint not found."})
+        if not self.owns(match[1]):
+            return self.send_json(404, {"error": "Job not found."})
         if not model_status()["video"]:
             return self.send_json(HTTPStatus.SERVICE_UNAVAILABLE,
                                   {"error": "The video engine is still downloading. This pitch is saved for retry."})
@@ -260,14 +397,19 @@ class App(SimpleHTTPRequestHandler):
             if not job or job.get("kind") == "story" or job["status"] not in ("pitch", "error") or "plan" not in job:
                 plan = None
             else:
+                self.original_job = copy.deepcopy(job)
                 plan = job["plan"]
                 job.update(status="queued", detail="Waiting for the local video engine…", progress=5)
         if plan is None:
             return self.send_json(HTTPStatus.CONFLICT, {"error": "Create a fresh pitch before rendering."})
-        WORKER.submit(render, job_id, plan)
+        self.save_submission(job_id)
+        RENDER_WORKER.submit(render, job_id, plan)
         self.send_json(HTTPStatus.ACCEPTED, {"id": job_id})
 
     def read_body(self, limit=8192):
+        if hasattr(self, "payload"):
+            return self.payload
+        self.connection.settimeout(15)
         size = int(self.headers.get("Content-Length", 0))
         if not 0 < size <= limit:
             raise ValueError
@@ -277,7 +419,9 @@ class App(SimpleHTTPRequestHandler):
         return data
 
     def submit_story(self, action, job_id, data):
-        WORKER.submit(stories.process, action, data, OUTPUT / job_id, FFMPEG, ENV,
+        self.save_submission(job_id)
+        executor = RENDER_WORKER if action == "render" else WORKER
+        executor.submit(stories.process, action, data, OUTPUT / job_id, FFMPEG, ENV,
                       lambda **fields: update(job_id, **fields))
         self.send_json(HTTPStatus.ACCEPTED, {"id": job_id})
 
@@ -308,13 +452,15 @@ class App(SimpleHTTPRequestHandler):
         job_id = uuid.uuid4().hex
         (OUTPUT / job_id).mkdir()
         with LOCK:
-            JOBS[job_id] = {"kind": "story", "voice": voice, "duration": duration, "language": language,
+            JOBS[job_id] = {"owner": self.owner, "kind": "story", "voice": voice, "duration": duration, "language": language,
                             "status": "queued", "detail": "Story queued…"}
         self.submit_story("draft", job_id, {"idea": idea.strip(), "category": category,
                                            "voice": voice, "duration": duration, "language": language,
                                            "prepared_story": prepared_story})
 
     def change_story(self, job_id, action):
+        if not self.owns(job_id):
+            return self.send_json(404, {"error": "Job not found."})
         data = {}
         if action in ("render", "preview"):
             try:
@@ -323,13 +469,28 @@ class App(SimpleHTTPRequestHandler):
                 if type(hook) is not int or not 0 <= hook < 3:
                     raise ValueError
                 data = {"hook": hook}
+                if "voice" in request:
+                    data["voice_override"] = request["voice"]
                 if action == "render":
                     background = request["background"]
                     if background not in stories.CLIPS:
                         raise ValueError
                     data["background"] = background
+                    style = request.get("caption_style", "bold")
+                    if style not in ("bold", "calm"):
+                        raise ValueError
+                    data["caption_style"] = style
             except (ValueError, KeyError, TypeError):
                 return self.send_json(HTTPStatus.BAD_REQUEST, {"error": "Choose a valid opening and background."})
+        elif action == "edit":
+            try:
+                request = self.read_body()
+                section, index, text = request["section"], request["index"], request["text"]
+                if section not in ("hooks", "setup", "ending") or type(index) is not int or index < 0 or not isinstance(text, str) or not 0 < len(text.strip()) <= 175:
+                    raise ValueError
+                data = {"section": section, "index": index, "text": text.strip()}
+            except (ValueError, KeyError, TypeError):
+                return self.send_json(400, {"error": "Choose a sentence and enter up to 175 characters."})
         elif action == "rewrite":
             try:
                 request = self.read_body()
@@ -344,10 +505,21 @@ class App(SimpleHTTPRequestHandler):
             job = JOBS.get(job_id)
             if not job or job.get("kind") != "story" or "story" not in job or job["status"] not in ("pitch", "ready", "error"):
                 data = None
+            elif action == "edit" and data["index"] >= len(job["story"][data["section"]]):
+                data = None
             else:
+                self.original_job = copy.deepcopy(job)
+                voice = data.pop("voice_override", job["voice"])
+                if not isinstance(voice, str) or voice not in stories.available_voices(job.get("language", "en")):
+                    return self.send_json(400, {"error": "Choose a narrator for this story's language."})
+                job["voice"] = voice
                 data = {**data, "story": job["story"], "voice": job["voice"],
                         "duration": job.get("duration", 60), "language": job.get("language", "en")}
                 job.update(status="queued", detail="Story queued…")
+                if action in ("render", "preview"):
+                    job["selected_hook"] = data["hook"]
+                if action == "render":
+                    job.update(background=data["background"], caption_style=data["caption_style"])
         if data is None:
             return self.send_json(HTTPStatus.CONFLICT, {"error": "Write a story or wait for the current task to finish."})
         self.submit_story(action, job_id, data)
@@ -364,7 +536,8 @@ class App(SimpleHTTPRequestHandler):
         job_id = uuid.uuid4().hex
         (OUTPUT / job_id).mkdir()
         with LOCK:
-            JOBS[job_id] = {"status": "queued", "detail": "Waiting for the local writer…"}
+            JOBS[job_id] = {"owner": self.owner, "status": "queued", "detail": "Waiting for the local writer…"}
+        self.save_submission(job_id)
         WORKER.submit(write_pitch, job_id, idea.strip())
         self.send_json(HTTPStatus.ACCEPTED, {"id": job_id})
 
@@ -375,7 +548,16 @@ if __name__ == "__main__":
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--stories-only", action="store_true", help="Serve only the cloud story studio.")
     options = parser.parse_args()
+    if options.host not in ("127.0.0.1", "localhost", "::1") and (not os.environ.get("FRAMELET_ACCESS_TOKEN") or os.environ.get("FRAMELET_HTTPS_PROXY") != "1"):
+        parser.error("Remote beta requires FRAMELET_ACCESS_TOKEN and FRAMELET_HTTPS_PROXY=1 behind a private HTTPS ingress.")
     OUTPUT.mkdir(parents=True, exist_ok=True)
+    import fcntl
+    process_lock = (OUTPUT / "server.lock").open("a")
+    try:
+        fcntl.flock(process_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        parser.error("This data directory is already served by another Framelet process.")
+    JOBS.update(store().load())
     App.stories_only = options.stories_only
     print(f"Framelet Studio · http://{options.host}:{options.port}", flush=True)
     ThreadingHTTPServer((options.host, options.port), App).serve_forever()
