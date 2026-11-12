@@ -69,6 +69,9 @@ def run_provider(provider, cases):
 
 
 if __name__ == "__main__":
+    sys.path.insert(0, str(ROOT))
+    from env_config import load_env
+    load_env()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--quick", action="store_true", help="Run one draft per provider to check connectivity.")
     parser.add_argument("--provider", choices=("groq", "gemini"), help="Run just one provider.")

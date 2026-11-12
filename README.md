@@ -11,7 +11,7 @@ runs without model weights, MLX, or a GPU.
 
 Set `GROQ_API_KEY` or `GEMINI_API_KEY`, `ELEVENLABS_API_KEY`, and the ElevenLabs
 voice IDs `FRAMELET_ELEVENLABS_VOICE_EN` and/or `FRAMELET_ELEVENLABS_VOICE_RU`
-in the server environment. Choose a voice recorded in the corresponding language.
+in the server environment or a local .env file. The application and comparison script load .env automatically, while existing environment variables take precedence. Choose a voice recorded in the corresponding language.
 
 For a local check of the cloud flow:
 
@@ -85,7 +85,7 @@ single phrase is not implemented yet.
 Cloud drafts receive a separate editorial check and at most one repair. When both
 keys exist, the editor defaults to the other provider; override with
 `FRAMELET_STORY_REVIEW_PROVIDER`. This is provisional routing, not a demonstrated
-quality ranking. A failed review preserves the previous story. Prepared drafts and
+quality ranking. If the editor API fails, the other configured provider is tried unless the review provider is explicitly pinned. A failed review preserves the previous story. Prepared drafts and
 manual edits do not incur this editorial API charge. Review is a useful filter,
 not a guarantee of interesting stories.
 
